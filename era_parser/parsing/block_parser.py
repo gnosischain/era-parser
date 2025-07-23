@@ -1,10 +1,10 @@
-"""Main block parsing logic"""
+"""Main block parsing logic with improved timestamp calculation"""
 
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
 from ..ingestion.compression import decompress_snappy_framed
-from ..config import get_fork_by_slot
+from ..config import get_fork_by_slot, get_network_config
 from .ssz_utils import read_uint32_at, read_uint64_at
 from .forks import get_fork_parser
 
@@ -19,6 +19,7 @@ class BlockParser:
             network: Network name for fork detection
         """
         self.network = network
+        self.network_config = get_network_config(network)
     
     def parse_block(self, compressed_data: bytes, slot: int) -> Optional[Dict[str, Any]]:
         """
@@ -54,8 +55,8 @@ class BlockParser:
             fork_parser = get_fork_parser(fork)
             body = fork_parser.parse_body(message_data[body_offset:])
             
-            # Get timestamp from execution payload if available
-            timestamp_str = body.get("execution_payload", {}).get("timestamp", "0")
+            # Calculate timestamp with proper fallback
+            timestamp_utc = self._calculate_timestamp(slot_parsed, body)
             
             return {
                 "data": {
@@ -71,7 +72,7 @@ class BlockParser:
                 "execution_optimistic": False, 
                 "finalized": True, 
                 "version": fork,
-                "timestamp_utc": self._format_timestamp(int(timestamp_str)),
+                "timestamp_utc": timestamp_utc,
                 "metadata": {
                     "compressed_size": len(compressed_data), 
                     "decompressed_size": len(decompressed_data)
@@ -81,6 +82,37 @@ class BlockParser:
         except Exception as e:
             print(f"Error parsing block at slot {slot}: {e}")
             return None
+    
+    def _calculate_timestamp(self, slot: int, body: Dict[str, Any]) -> str:
+        """
+        Calculate block timestamp with proper fallback logic
+        
+        Args:
+            slot: Block slot number
+            body: Parsed block body
+            
+        Returns:
+            ISO formatted timestamp string
+        """
+        # Method 1: Try to get timestamp from execution payload (Bellatrix+)
+        execution_payload = body.get("execution_payload", {})
+        if execution_payload:
+            timestamp_str = execution_payload.get("timestamp", "0")
+            try:
+                timestamp = int(timestamp_str)
+                if timestamp > 0:
+                    return self._format_timestamp(timestamp)
+            except (ValueError, TypeError):
+                pass
+        
+        # Method 2: Calculate from genesis time and slot (fallback for all blocks)
+        genesis_time = self.network_config['GENESIS_TIME']
+        seconds_per_slot = self.network_config['SECONDS_PER_SLOT']
+        
+        # Calculate block timestamp: genesis_time + (slot * seconds_per_slot)
+        block_timestamp = genesis_time + (slot * seconds_per_slot)
+        
+        return self._format_timestamp(block_timestamp)
     
     def _format_timestamp(self, timestamp: int) -> str:
         """Format timestamp to ISO string"""

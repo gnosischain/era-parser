@@ -1,4 +1,4 @@
-"""Parquet exporter"""
+"""Parquet exporter with sync_aggregates support"""
 
 import pandas as pd
 from typing import List, Dict, Any
@@ -10,7 +10,7 @@ class ParquetExporter(BaseExporter):
     """Exporter for Parquet format"""
     
     def export_blocks(self, blocks: List[Dict[str, Any]], output_file: str):
-        """Export blocks to Parquet format (flattened)"""
+        """Export blocks to Parquet format (flattened, no sync aggregate fields)"""
         if not blocks:
             print("No blocks to export")
             return

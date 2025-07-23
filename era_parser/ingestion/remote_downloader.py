@@ -349,8 +349,9 @@ class RemoteEraDownloader:
                 print(f"   ⚠️  Cleanup failed: {e}")
     
     def process_era_range(self, start_era: int, end_era: Optional[int], 
-                         command: str, base_output: str, separate_files: bool = False,
-                         resume: bool = False) -> Dict[str, Any]:
+                     command: str, base_output: str, separate_files: bool = False,
+                     resume: bool = False, export_type: str = "file",
+                     processed_eras: set = None) -> Dict[str, Any]:
         """
         Download and process a range of era files
         
@@ -361,6 +362,8 @@ class RemoteEraDownloader:
             base_output: Base output filename
             separate_files: Whether to create separate files per data type
             resume: Whether to skip already processed eras
+            export_type: "file" or "clickhouse"
+            processed_eras: Set of already processed eras (for ClickHouse)
             
         Returns:
             Processing summary
@@ -371,6 +374,7 @@ class RemoteEraDownloader:
         print(f"   Output: {base_output}")
         print(f"   Separate files: {separate_files}")
         print(f"   Resume: {resume}")
+        print(f"   Export type: {export_type}")
         
         # Discover available eras
         available_eras = self.discover_era_files(start_era, end_era)
@@ -381,9 +385,14 @@ class RemoteEraDownloader:
         
         # Filter out already processed eras if resuming
         if resume:
-            processed_eras = set(self.progress_data.get("processed_eras", []))
+            processed_eras_file = set(self.progress_data.get("processed_eras", []))
+            available_eras = [(era, url) for era, url in available_eras if era not in processed_eras_file]
+            print(f"📋 Resume mode: {len(available_eras)} eras remaining after filtering file processed ones")
+        
+        # Filter out ClickHouse processed eras
+        if processed_eras:
             available_eras = [(era, url) for era, url in available_eras if era not in processed_eras]
-            print(f"📋 Resume mode: {len(available_eras)} eras remaining after filtering processed ones")
+            print(f"📋 ClickHouse filter: {len(available_eras)} eras remaining after filtering ClickHouse processed ones")
         
         # Process each era
         processed_count = 0
@@ -411,11 +420,15 @@ class RemoteEraDownloader:
                 cli.setup(local_path)
                 
                 # Generate output filename
-                output_file = self._generate_era_output_filename(base_output, era_number)
-                print(f"   📂 Output: {output_file}")
+                if export_type == "file":
+                    output_file = self._generate_era_output_filename(base_output, era_number)
+                    print(f"   📂 Output: {output_file}")
+                else:
+                    output_file = "clickhouse_output"  # Not used for ClickHouse
+                    print(f"   🗄️  Output: ClickHouse")
                 
                 # Process based on command
-                success = cli._process_single_era(command, output_file, separate_files)
+                success = cli._process_single_era(command, output_file, separate_files, export_type)
                 
                 if success:
                     processed_count += 1
@@ -466,7 +479,7 @@ class RemoteEraDownloader:
         }
         
         return summary
-    
+
     def _generate_era_output_filename(self, base_output: str, era_number: int) -> str:
         """Generate output filename for era"""
         # Extract directory and base name

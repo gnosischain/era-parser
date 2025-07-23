@@ -1,9 +1,9 @@
-"""Base exporter interface"""
-
 import json
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
 from datetime import datetime, timezone
+
+from ..config import get_network_config
 
 class BaseExporter(ABC):
     """Base class for all exporters"""
@@ -16,6 +16,8 @@ class BaseExporter(ABC):
             era_info: Era information dictionary
         """
         self.era_info = era_info
+        self.network = era_info.get('network', 'mainnet')
+        self.network_config = get_network_config(self.network)
     
     @abstractmethod
     def export_blocks(self, blocks: List[Dict[str, Any]], output_file: str):
@@ -36,11 +38,48 @@ class BaseExporter(ABC):
             "export_timestamp": datetime.now(timezone.utc).isoformat()
         }
     
+    def _calculate_slot_timestamp(self, slot: int) -> str:
+        """
+        Calculate timestamp for a given slot using network configuration
+        
+        Args:
+            slot: Block slot number
+            
+        Returns:
+            ISO formatted timestamp string
+        """
+        genesis_time = self.network_config['GENESIS_TIME']
+        seconds_per_slot = self.network_config['SECONDS_PER_SLOT']
+        
+        # Calculate block timestamp: genesis_time + (slot * seconds_per_slot)
+        block_timestamp = genesis_time + (slot * seconds_per_slot)
+        
+        return datetime.fromtimestamp(block_timestamp, timezone.utc).isoformat()
+    
     def flatten_block_for_table(self, block: Dict[str, Any]) -> Dict[str, Any]:
-        """Flatten block structure for tabular formats"""
+        """Flatten block structure for tabular formats (no sync aggregate fields)"""
         message = block.get("data", {}).get("message", {})
         body = message.get("body", {})
         execution_payload = body.get("execution_payload", {})
+        
+        # Get slot for timestamp calculation
+        slot = int(message.get("slot", 0))
+        
+        # Use the block's timestamp_utc if available, otherwise calculate from slot
+        timestamp_utc = block.get("timestamp_utc")
+        if not timestamp_utc or timestamp_utc == "1970-01-01T00:00:00+00:00":
+            timestamp_utc = self._calculate_slot_timestamp(slot)
+        
+        # Extract execution payload timestamp for reference
+        execution_timestamp = execution_payload.get("timestamp", "0")
+        try:
+            execution_timestamp_int = int(execution_timestamp)
+            if execution_timestamp_int > 0:
+                execution_timestamp_utc = datetime.fromtimestamp(execution_timestamp_int, timezone.utc).isoformat()
+            else:
+                execution_timestamp_utc = None
+        except (ValueError, TypeError):
+            execution_timestamp_utc = None
         
         flattened = {
             # Block basics
@@ -50,9 +89,10 @@ class BaseExporter(ABC):
             "state_root": message.get("state_root"),
             "signature": block.get("data", {}).get("signature"),
             
-            # Block metadata
+            # Block metadata with improved timestamp
             "version": block.get("version"),
-            "timestamp_utc": block.get("timestamp_utc"),
+            "timestamp_utc": timestamp_utc,
+            "execution_timestamp_utc": execution_timestamp_utc,  # Separate field for execution payload timestamp
             "compressed_size": block.get("metadata", {}).get("compressed_size"),
             "decompressed_size": block.get("metadata", {}).get("decompressed_size"),
             
@@ -74,9 +114,7 @@ class BaseExporter(ABC):
             "bls_change_count": len(body.get("bls_to_execution_changes", [])),
             "blob_commitment_count": len(body.get("blob_kzg_commitments", [])),
             
-            # Sync aggregate
-            "sync_committee_bits": body.get("sync_aggregate", {}).get("sync_committee_bits"),
-            "sync_committee_signature": body.get("sync_aggregate", {}).get("sync_committee_signature"),
+            # NOTE: sync_aggregate fields removed - they go to separate table/file
             
             # Execution payload
             "parent_hash": execution_payload.get("parent_hash"),
@@ -88,7 +126,7 @@ class BaseExporter(ABC):
             "block_number": execution_payload.get("block_number"),
             "gas_limit": execution_payload.get("gas_limit"),
             "gas_used": execution_payload.get("gas_used"),
-            "timestamp": execution_payload.get("timestamp"),
+            "timestamp": execution_payload.get("timestamp"),  # Raw timestamp from execution payload
             "base_fee_per_gas": execution_payload.get("base_fee_per_gas"),
             "block_hash": execution_payload.get("block_hash"),
             "blob_gas_used": execution_payload.get("blob_gas_used"),
@@ -102,6 +140,7 @@ class BaseExporter(ABC):
             "execution_requests": json.dumps(body.get("execution_requests", {})),
             "bls_to_execution_changes": json.dumps(body.get("bls_to_execution_changes", [])),
             "blob_kzg_commitments": json.dumps(body.get("blob_kzg_commitments", [])),
+            "sync_aggregate": json.dumps(body.get("sync_aggregate", {})),  # Keep as JSON for reference
             
             # Counts for reference
             "transaction_count": len(execution_payload.get("transactions", [])),

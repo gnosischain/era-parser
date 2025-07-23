@@ -114,13 +114,13 @@ era-parser --remote gnosis 1082+ all-blocks data.parquet --resume
 
 ```bash
 # Process all Gnosis era files in current directory
-era-parser --batch gnosis-*.era all-blocks gnosis_dataset.parquet
+era-parser --batch 'gnosis-*.era' all-blocks gnosis_dataset.parquet
 
 # Process files in a specific directory
 era-parser --batch /data/era_files/ transactions tx_analysis.csv
 
 # Process era range with separate files per data type
-era-parser --batch mainnet-026*.era all-blocks era_26xx.parquet --separate
+era-parser --batch 'mainnet-026*.era' all-blocks era_26xx.parquet --separate
 ```
 
 ### Docker Usage
