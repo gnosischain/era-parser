@@ -11,11 +11,14 @@ A modular, extensible parser for Gnosis/Ethereum beacon chain era files supporti
 - 📁 **Flexible Output**: Single files or separate files per data type
 - 🚀 **Batch Processing**: Process multiple era files at once with wildcards
 - 🌍 **Remote Era Processing**: Download and process era files from remote URLs
+- 🐳 **Docker Support**: Easy containerized deployment and execution
 - 🧩 **Modular Architecture**: Easy to extend with new forks and networks
 - ⚡ **High Performance**: Memory-efficient streaming processing
 - 🔍 **Fork Auto-Detection**: Automatically detects and uses correct parser
 
 ## Installation
+
+### Native Installation
 
 ```bash
 # Clone the repository  
@@ -33,7 +36,7 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-### System Dependencies
+#### System Dependencies
 
 **macOS:**
 ```bash
@@ -45,9 +48,29 @@ brew install snappy
 sudo apt-get install libsnappy-dev
 ```
 
+### Docker Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/your-org/era-parser.git
+cd era-parser
+
+# Copy and configure environment
+cp .env.example .env
+# Edit .env with your ERA_BASE_URL for remote processing
+
+# Build the Docker image
+docker build -t era-parser:latest .
+
+# Create directories
+mkdir -p output era-files
+```
+
 ## Quick Start
 
-### Local File Processing
+### Native Usage
+
+#### Local File Processing
 
 ```bash
 # Show era file statistics
@@ -66,7 +89,7 @@ era-parser gnosis-02607-fe3b60d1.era all-blocks data.csv --separate
 era-parser gnosis-02607-fe3b60d1.era transactions txs.parquet
 ```
 
-### Remote Era Processing
+#### Remote Era Processing
 
 Set up remote processing by configuring the base URL:
 
@@ -87,7 +110,7 @@ era-parser --remote gnosis 1082-1100 --download-only
 era-parser --remote gnosis 1082+ all-blocks data.parquet --resume
 ```
 
-### Batch Processing (Local Files)
+#### Batch Processing (Local Files)
 
 ```bash
 # Process all Gnosis era files in current directory
@@ -98,6 +121,70 @@ era-parser --batch /data/era_files/ transactions tx_analysis.csv
 
 # Process era range with separate files per data type
 era-parser --batch mainnet-026*.era all-blocks era_26xx.parquet --separate
+```
+
+### Docker Usage
+
+#### Local File Processing
+
+```bash
+# Place your era file in era-files/
+cp gnosis-02607-fe3b60d1.era ./era-files/
+
+# Show era file statistics
+docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era stats
+
+# Parse specific block
+docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era block 21348352
+
+# Export all blocks to JSON
+docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era all-blocks blocks.json
+
+# Export with separate files per data type
+docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era all-blocks data.csv --separate
+
+# Extract only transactions
+docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era transactions txs.csv
+
+# Extract only withdrawals
+docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era withdrawals withdrawals.parquet
+
+# Extract only attestations  
+docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era attestations attestations.json
+```
+
+#### Remote Processing
+
+```bash
+# Process era range with separate files
+docker-compose run --rm era-parser --remote gnosis 1082-1100 all-blocks remote_data.parquet --separate
+
+# Process from era until end with resume
+docker-compose run --rm era-parser --remote gnosis 1082+ transactions txs.csv --resume
+
+# Process single era
+docker-compose run --rm era-parser --remote gnosis 1082 all-blocks single_era.json
+
+# Download only (no processing)
+docker-compose run --rm era-parser --remote gnosis 1082-1100 --download-only
+
+# Show remote progress
+docker-compose run --rm era-parser --remote-progress gnosis
+
+# Clear remote progress
+docker-compose run --rm era-parser --remote-clear gnosis
+```
+
+#### Interactive Shell
+
+```bash
+# Launch shell for any custom command
+docker-compose run --rm shell
+
+# Inside the shell:
+era-parser --help
+era-parser /app/era-files/your-file.era stats
+era-parser --remote mainnet 2600 transactions mainnet_txs.csv
 ```
 
 ## Usage
@@ -186,6 +273,31 @@ export ERA_CLEANUP_AFTER_PROCESS=true
 | `transactions` | Extract only transactions | `era-parser era.era transactions txs.csv` | `era-parser --batch gnosis-*.era transactions tx_data.csv` |
 | `withdrawals` | Extract only withdrawals | `era-parser era.era withdrawals w.parquet` | `era-parser --batch mainnet-*.era withdrawals wd_data.parquet` |
 | `attestations` | Extract only attestations | `era-parser era.era attestations atts.json` | `era-parser --batch *.era attestations att_analysis.csv` |
+
+## Docker Configuration
+
+The Docker setup provides a clean, isolated environment for running Era Parser with all dependencies included.
+
+### Directory Structure
+
+```
+era-parser/
+├── Dockerfile
+├── docker-compose.yml  
+├── .env                # Environment configuration
+├── output/             # All output files
+└── era-files/          # Local era files (optional)
+    └── your-file.era
+```
+
+### Environment Variables for Docker
+
+Set in `.env` file:
+- `ERA_BASE_URL`: Required for remote processing
+- `ERA_CLEANUP_AFTER_PROCESS`: Delete downloaded files after processing (default: true)
+- `ERA_MAX_RETRIES`: Maximum download retries (default: 3)
+
+All output files are saved to `./output/` on your host machine.
 
 ## Remote Processing Examples
 
@@ -382,6 +494,25 @@ era-parser --batch 'gnosis-*.era' all-blocks data.json
 era-parser --batch era-*.era all-blocks data.parquet --separate
 ```
 
+### Docker Issues
+
+**Permission issues:**
+```bash
+sudo chown -R $USER:$USER ./output
+```
+
+**Network issues:**
+```bash
+# Increase retry count in .env
+echo "ERA_MAX_RETRIES=10" >> .env
+```
+
+**Memory issues:**
+```bash
+# Use separate files mode for large datasets
+docker-compose run --rm era-parser --remote gnosis 1082-1090 all-blocks data.parquet --separate
+```
+
 ## Performance Tips
 
 ### For Remote Processing
@@ -394,6 +525,11 @@ era-parser --batch era-*.era all-blocks data.parquet --separate
 - Process era ranges in batches for very large datasets
 - Use separate files mode for multiple data types
 - Monitor disk space when processing many eras
+
+### For Docker Usage
+- Mount specific directories only when needed
+- Use the shell service for interactive exploration
+- Keep the .env file properly configured for your environment
 
 ## Architecture
 
@@ -425,7 +561,9 @@ era-parser/
 │   ├── json_exporter.py # JSON/JSONL export
 │   ├── csv_exporter.py  # CSV export
 │   └── parquet_exporter.py # Parquet export
-└── cli.py          # Command line interface with remote support
+├── cli.py          # Command line interface with remote support
+├── Dockerfile      # Docker container configuration
+└── docker-compose.yml # Docker Compose services
 ```
 
 ### Key Components
@@ -436,6 +574,7 @@ era-parser/
 - **Fork Parsers**: Specialized parsers for each fork (Phase0, Altair, etc.)
 - **Exporters**: Format-specific output handlers with consistent interface
 - **Config System**: Centralized network and fork configuration
+- **Docker Support**: Containerized deployment with Docker and Docker Compose
 
 ## Supported Networks & Forks
 
@@ -539,6 +678,9 @@ FORK_PARSERS = {
 # Automatically detects and parses Fulu fork
 era-parser fulu-era-12345.era all-blocks fulu_data.json
 era-parser --remote fulu 1000+ transactions fulu_txs.csv --resume
+
+# Works with Docker too
+docker-compose run --rm era-parser /app/era-files/fulu-era-12345.era all-blocks fulu_data.json
 ```
 
 ## Contributing
@@ -558,6 +700,7 @@ era-parser --remote fulu 1000+ transactions fulu_txs.csv --resume
 - Use the registry pattern for extensibility
 - Maintain backwards compatibility
 - Consider batch processing impact for new features
+- Test both native and Docker deployments
 
 ## License
 

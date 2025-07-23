@@ -167,6 +167,7 @@ cython_debug/
 
 # Era files (large binary files)
 *.era
+era-files/
 
 # Output directories and files
 output/*.*

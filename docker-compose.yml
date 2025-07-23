@@ -1,0 +1,15 @@
+services:
+  # Base service - run any era-parser command
+  era-parser: &base
+    image: era-parser:latest
+    volumes:
+      - ./output:/app/output
+      - ./era-files:/app/era-files:ro
+    env_file: .env
+
+  # Interactive shell
+  shell:
+    <<: *base
+    entrypoint: ["/bin/bash"]
+    stdin_open: true
+    tty: true
