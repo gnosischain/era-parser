@@ -72,7 +72,7 @@ Set up remote processing by configuring the base URL:
 
 ```bash
 # Set the remote era files base URL
-export ERA_BASE_URL=https://era-files-dadb9c4ad1d99b9f.s3.eu-central-1.amazonaws.com
+export ERA_BASE_URL=https://era-files.com
 
 # Process a range of remote eras
 era-parser --remote gnosis 1082-1100 all-blocks gnosis_data.parquet --separate
@@ -156,7 +156,7 @@ Create a `.env` file in your project root:
 
 ```bash
 # Required: Base URL for remote era files
-ERA_BASE_URL=https://era-files-dadb9c4ad1d99b9f.s3.eu-central-1.amazonaws.com
+ERA_BASE_URL=https://era-files.com
 
 # Optional: Directory for temporary downloads (default: system temp)
 ERA_DOWNLOAD_DIR=./temp_era_files
@@ -171,7 +171,7 @@ ERA_MAX_RETRIES=3
 Or set environment variables directly:
 
 ```bash
-export ERA_BASE_URL=https://era-files-dadb9c4ad1d99b9f.s3.eu-central-1.amazonaws.com
+export ERA_BASE_URL=https://era-files.com
 export ERA_DOWNLOAD_DIR=./temp_era_files
 export ERA_CLEANUP_AFTER_PROCESS=true
 ```
@@ -192,7 +192,7 @@ export ERA_CLEANUP_AFTER_PROCESS=true
 ### Basic Remote Processing
 ```bash
 # Set environment
-export ERA_BASE_URL=https://era-files-dadb9c4ad1d99b9f.s3.eu-central-1.amazonaws.com
+export ERA_BASE_URL=https://era-files.com
 
 # Process era range with separate files per data type
 era-parser --remote gnosis 1082-1100 all-blocks gnosis_analysis.parquet --separate
@@ -339,7 +339,7 @@ slot,attestation_index,committee_index,source_epoch,target_epoch,beacon_block_ro
 
 **Solution:**
 ```bash
-export ERA_BASE_URL=https://era-files-dadb9c4ad1d99b9f.s3.eu-central-1.amazonaws.com
+export ERA_BASE_URL=https://era-files.com
 ```
 
 #### Network Connection Issues
