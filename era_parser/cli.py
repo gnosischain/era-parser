@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from .ingestion import EraReader
 from .parsing import BlockParser
-from .export import JSONExporter, CSVExporter, ParquetExporter, ClickHouseExporter
+from .export import JSONExporter, CSVExporter, ParquetExporter, ClickHouseExporter, EraStateManager
 from .config import detect_network_from_filename, get_network_config
 from .ingestion.remote_downloader import RemoteEraDownloader, get_remote_era_downloader
 
@@ -634,6 +634,112 @@ class EraParserCLI:
             traceback.print_exc()
             return False
 
+    def show_era_processing_status(self, network: str = None):
+        """Show era processing status with granular dataset tracking"""
+        try:
+            state_manager = EraStateManager()
+            summary = state_manager.get_processing_summary(network)
+            
+            print(f"📊 Era Processing Status" + (f" ({network})" if network else " (All Networks)"))
+            print("="*60)
+            
+            # Era-level summary
+            if summary['era_summary']:
+                print("\n📁 Era Summary:")
+                for net, stats in summary['era_summary'].items():
+                    print(f"  {net}:")
+                    print(f"    Total Eras: {stats['total_eras']}")
+                    print(f"    Fully Completed: {stats['fully_completed_eras']}")
+                    print(f"    Processing: {stats['processing_eras']}")
+                    print(f"    Failed: {stats['fully_failed_eras']}")
+                    print(f"    Total Rows: {stats['total_rows']:,}")
+                    
+                    if stats['total_eras'] > 0:
+                        completion_pct = (stats['fully_completed_eras'] / stats['total_eras']) * 100
+                        print(f"    Completion: {completion_pct:.1f}%")
+            
+            # Dataset-level summary
+            if summary['dataset_summary']:
+                print("\n📊 Dataset Summary:")
+                for net, datasets in summary['dataset_summary'].items():
+                    print(f"  {net}:")
+                    for dataset, stats in datasets.items():
+                        print(f"    {dataset}:")
+                        print(f"      Completed Eras: {stats['completed_eras']}")
+                        print(f"      Failed Eras: {stats['failed_eras']}")
+                        print(f"      Total Rows: {stats['total_rows']:,}")
+                        print(f"      Highest Era: {stats['highest_completed_era']}")
+            
+            if not summary['era_summary'] and not summary['dataset_summary']:
+                print("No processing data found.")
+                
+        except Exception as e:
+            print(f"❌ Error getting status: {e}")
+
+    def show_era_failed_datasets(self, network: str = None, limit: int = 20):
+        """Show failed datasets for retry"""
+        try:
+            state_manager = EraStateManager()
+            failed = state_manager.get_failed_datasets(network, limit)
+            
+            print(f"❌ Failed Datasets" + (f" ({network})" if network else " (All Networks)"))
+            print("="*60)
+            
+            if not failed:
+                print("No failed datasets found.")
+                return
+            
+            for failure in failed:
+                print(f"Era: {failure['era_filename']}")
+                print(f"  Dataset: {failure['dataset']}")
+                print(f"  Network: {failure['network']}")
+                print(f"  Era Number: {failure['era_number']}")
+                print(f"  Attempts: {failure['attempt_count']}")
+                print(f"  Error: {failure['error_message'][:100]}...")
+                print(f"  Failed At: {failure['created_at']}")
+                print()
+                
+        except Exception as e:
+            print(f"❌ Error getting failed datasets: {e}")
+
+    def cleanup_era_stale_processing(self, timeout_minutes: int = 30):
+        """Cleanup stale era processing entries"""
+        try:
+            state_manager = EraStateManager()
+            reset_count = state_manager.cleanup_stale_processing(timeout_minutes)
+            
+            if reset_count > 0:
+                print(f"✅ Reset {reset_count} stale processing entries")
+            else:
+                print("No stale processing entries found")
+                
+        except Exception as e:
+            print(f"❌ Error cleaning up stale processing: {e}")
+
+    def check_era_status(self, era_file: str):
+        """Check processing status of a specific era file"""
+        try:
+            state_manager = EraStateManager()
+            era_filename = state_manager.get_era_filename_from_path(era_file)
+            
+            # Check if fully processed
+            is_complete = state_manager.is_era_fully_processed(era_filename)
+            pending_datasets = state_manager.get_pending_datasets(era_filename)
+            
+            print(f"📋 Era Status: {era_filename}")
+            print("="*60)
+            print(f"Fully Processed: {'✅ Yes' if is_complete else '❌ No'}")
+            
+            if pending_datasets:
+                print(f"Pending Datasets ({len(pending_datasets)}):")
+                for dataset in pending_datasets:
+                    print(f"  - {dataset}")
+            else:
+                print("All datasets completed ✅")
+                
+        except Exception as e:
+            print(f"❌ Error checking era status: {e}")
+
 
 def main():
     """Simple main CLI entry point"""
@@ -656,15 +762,17 @@ def main():
         print("  era-parser <era_file> sync_aggregates --export clickhouse # Export sync aggregates to ClickHouse")
         print("")
         print("REMOTE ERA PROCESSING:")
-        print("  era-parser --remote <network> <era_range> <command> <output>           # Process remote eras")
-        print("  era-parser --remote <network> <era_range> <command> <output> --separate  # Separate files")
+        print("  era-parser --remote <network> <era_range> <command> <o>           # Process remote eras")
+        print("  era-parser --remote <network> <era_range> <command> <o> --separate  # Separate files")
         print("  era-parser --remote <network> <era_range> <command> --export clickhouse # Remote to ClickHouse")
         print("  era-parser --remote <network> <era_range> --download-only              # Download only")
-        print("  era-parser --remote <network> <era_range> <command> <output> --resume # Resume processing")
+        print("  era-parser --remote <network> <era_range> <command> <o> --resume # Resume processing")
         print("")
-        print("CLICKHOUSE MANAGEMENT:")
-        print("  era-parser --clickhouse-status <network>              # Show processing status")
-        print("  era-parser --clickhouse-failed <network>              # Show failed eras")
+        print("ERA STATE MANAGEMENT:")
+        print("  era-parser --era-status <network|all>                 # Show era processing status")
+        print("  era-parser --era-failed <network|all> [limit]         # Show failed datasets")
+        print("  era-parser --era-cleanup [timeout_minutes]            # Clean stale processing")
+        print("  era-parser --era-check <era_file>                     # Check specific era status")
         print("")
         print("REMOTE UTILITY COMMANDS:")
         print("  era-parser --remote-progress <network>                # Show remote progress")
@@ -676,6 +784,7 @@ def main():
         print("  1082+       # From era 1082 until no more files found")
         print("")
         print("NOTES:")
+        print("  - Era state management provides granular dataset tracking")
         print("  - ClickHouse export ALWAYS creates separate tables (like --separate)")
         print("  - Parquet with --separate creates one file per data type")
         print("  - All nested data is fully extracted and preserved")
@@ -812,54 +921,38 @@ def main():
             traceback.print_exc()
             sys.exit(1)
     
-    # Handle ClickHouse status commands
-    elif sys.argv[1] == "--clickhouse-status":
+    # Handle era processing status commands
+    elif sys.argv[1] == "--era-status":
         if len(sys.argv) < 3:
-            print("Usage: era-parser --clickhouse-status <network>")
+            print("Usage: era-parser --era-status [network]")
+            print("       era-parser --era-status all")
             sys.exit(1)
         
-        network = sys.argv[2]
-        try:
-            from .export.clickhouse_service import ClickHouseService
-            service = ClickHouseService()
-            processed = service.get_processed_eras(network)
-            failed = service.get_failed_eras(network)
-            
-            print(f"📊 ClickHouse Status ({network})")
-            print(f"   Successfully processed: {len(processed)} eras")
-            print(f"   Failed: {len(failed)} eras")
-            
-            if processed:
-                print(f"   Era range: {min(processed)} - {max(processed)}")
-            
-            if failed:
-                print(f"\n❌ Recent failures:")
-                for failure in failed[:5]:
-                    print(f"   Era {failure['era_number']}: {failure['error_message'][:100]}")
-                    
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            sys.exit(1)
+        network = sys.argv[2] if sys.argv[2] != 'all' else None
+        cli.show_era_processing_status(network)
     
-    elif sys.argv[1] == "--clickhouse-failed":
+    elif sys.argv[1] == "--era-failed":
         if len(sys.argv) < 3:
-            print("Usage: era-parser --clickhouse-failed <network>")
+            print("Usage: era-parser --era-failed [network] [limit]")
+            print("       era-parser --era-failed all")
             sys.exit(1)
         
-        network = sys.argv[2]
-        try:
-            from .export.clickhouse_service import ClickHouseService
-            service = ClickHouseService()
-            failed = service.get_failed_eras(network)
-            
-            print(f"❌ Failed eras for {network}:")
-            for failure in failed:
-                print(f"   Era {failure['era_number']}: {failure['error_message']}")
-                    
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            sys.exit(1)
+        network = sys.argv[2] if sys.argv[2] != 'all' else None
+        limit = int(sys.argv[3]) if len(sys.argv) > 3 else 20
+        cli.show_era_failed_datasets(network, limit)
     
+    elif sys.argv[1] == "--era-cleanup":
+        timeout = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+        cli.cleanup_era_stale_processing(timeout)
+    
+    elif sys.argv[1] == "--era-check":
+        if len(sys.argv) < 3:
+            print("Usage: era-parser --era-check <era_file>")
+            sys.exit(1)
+        
+        era_file = sys.argv[2]
+        cli.check_era_status(era_file)
+     
     # Handle remote utility commands
     elif sys.argv[1] == "--remote-progress":
         if len(sys.argv) < 3:

@@ -1,23 +1,25 @@
-"""Fixed ClickHouse exporter that properly loads all data types including sync_aggregates"""
+"""ClickHouse exporter with granular era state management"""
 
 import json
 import logging
 import tempfile
+import time
 from typing import List, Dict, Any
 from pathlib import Path
 
 import pandas as pd
 from .base import BaseExporter
 from .clickhouse_service import ClickHouseService
+from .era_state_manager import EraStateManager
 
 logger = logging.getLogger(__name__)
 
 class ClickHouseExporter(BaseExporter):
-    """Fixed ClickHouse exporter that loads all data types into separate tables"""
+    """ClickHouse exporter with granular dataset state tracking"""
 
     def __init__(self, era_info: Dict[str, Any], era_file_path: str = None):
         """
-        Initialize ClickHouse exporter
+        Initialize ClickHouse exporter with state management
         
         Args:
             era_info: Era information dictionary
@@ -26,6 +28,7 @@ class ClickHouseExporter(BaseExporter):
         super().__init__(era_info)
         self.era_file_path = era_file_path
         self.service = ClickHouseService()
+        self.state_manager = EraStateManager()
         self.network = era_info.get('network', 'mainnet')
         
         # Handle era_number properly
@@ -44,11 +47,17 @@ class ClickHouseExporter(BaseExporter):
         elif self.era_number is None:
             self.era_number = 0
         
-        # Calculate file hash for tracking
+        # Get era filename and file hash
         if era_file_path:
-            self.file_hash = ClickHouseService.calculate_file_hash(era_file_path)
+            self.era_filename = self.state_manager.get_era_filename_from_path(era_file_path)
+            self.file_hash = EraStateManager.calculate_file_hash(era_file_path)
         else:
+            self.era_filename = f"remote_{self.era_number}"
             self.file_hash = f"remote_{self.era_number}"
+        
+        # Generate worker ID
+        import uuid
+        self.worker_id = str(uuid.uuid4())[:8]
 
     def export_blocks(self, blocks: List[Dict[str, Any]], output_file: str):
         """Export complete blocks to ClickHouse - not used in new approach"""
@@ -61,42 +70,74 @@ class ClickHouseExporter(BaseExporter):
         self.load_data_to_table(data, data_type)
 
     def load_all_data_types(self, all_data: Dict[str, List[Dict[str, Any]]]):
-        """Load all data types into their respective ClickHouse tables"""
+        """
+        Load all data types into their respective ClickHouse tables with granular state tracking.
+        Only processes datasets that haven't been completed yet.
+        """
         if not all_data:
             logger.warning("No data to load")
             return
 
-        # Check if era already processed
-        if self.service.is_era_processed(self.network, self.era_number, self.file_hash):
-            logger.info(f"Era {self.era_number} already processed, skipping")
+        # Get list of datasets that need processing
+        target_datasets = list(all_data.keys())
+        pending_datasets = self.state_manager.get_pending_datasets(self.era_filename, target_datasets)
+        
+        if not pending_datasets:
+            logger.info(f"Era {self.era_filename} already fully processed, skipping")
             return
-
-        try:
-            # Mark as processing
-            self.service.mark_era_processing(self.network, self.era_number, self.file_hash)
-            logger.info(f"Processing era {self.era_number} - loading all data types")
+        
+        logger.info(f"Processing era {self.era_filename} - {len(pending_datasets)} datasets need work: {pending_datasets}")
+        
+        # Process each pending dataset independently
+        for dataset in pending_datasets:
+            if dataset not in all_data:
+                logger.warning(f"Dataset {dataset} not found in provided data, skipping")
+                continue
+                
+            data_list = all_data[dataset]
+            if not data_list:
+                logger.info(f"No data for {dataset}, marking as completed with 0 rows")
+                self.state_manager.complete_dataset(self.era_filename, dataset, 0)
+                continue
             
-            total_records = 0
-            loaded_tables = []
+            # Claim dataset for processing
+            if not self.state_manager.claim_dataset(self.era_filename, dataset, self.worker_id, self.file_hash):
+                logger.info(f"Dataset {dataset} already being processed by another worker, skipping")
+                continue
             
-            # Load each data type into its table
-            for data_type, data_list in all_data.items():
-                if data_list:  # Only load non-empty data
-                    logger.info(f"Loading {len(data_list)} records into {data_type} table")
-                    records_loaded = self.load_data_to_table(data_list, data_type)
-                    total_records += records_loaded
-                    loaded_tables.append(f"{data_type}({records_loaded})")
-                else:
-                    logger.info(f"No data for {data_type}, skipping")
-            
-            # Mark as successful
-            self.service.mark_era_success(self.network, self.era_number, self.file_hash, total_records)
-            logger.info(f"Successfully loaded era {self.era_number}: {', '.join(loaded_tables)} - Total: {total_records} records")
-
-        except Exception as e:
-            logger.error(f"Failed to load era {self.era_number}: {e}")
-            self.service.mark_era_failed(self.network, self.era_number, self.file_hash, str(e))
-            raise
+            # Process the dataset
+            start_time = time.time()
+            try:
+                logger.info(f"Loading {len(data_list)} records into {dataset} table")
+                records_loaded = self.load_data_to_table(data_list, dataset)
+                
+                # Calculate processing time
+                processing_duration_ms = int((time.time() - start_time) * 1000)
+                
+                # Mark as completed
+                self.state_manager.complete_dataset(
+                    self.era_filename, 
+                    dataset, 
+                    records_loaded, 
+                    processing_duration_ms
+                )
+                
+                logger.info(f"Successfully completed {dataset}: {records_loaded} records in {processing_duration_ms}ms")
+                
+            except Exception as e:
+                # Mark as failed
+                error_msg = f"Failed to load {dataset}: {str(e)}"
+                self.state_manager.fail_dataset(self.era_filename, dataset, error_msg)
+                logger.error(error_msg)
+                # Continue with other datasets instead of failing completely
+                continue
+        
+        # Log final status
+        remaining_pending = self.state_manager.get_pending_datasets(self.era_filename, target_datasets)
+        if not remaining_pending:
+            logger.info(f"Era {self.era_filename} now fully processed!")
+        else:
+            logger.warning(f"Era {self.era_filename} still has {len(remaining_pending)} pending datasets: {remaining_pending}")
 
     def load_data_to_table(self, data: List[Dict[str, Any]], table_name: str) -> int:
         """Load data into specific ClickHouse table"""
@@ -154,3 +195,27 @@ class ClickHouseExporter(BaseExporter):
         except Exception as e:
             logger.error(f"Failed to load data into {table_name}: {e}")
             raise
+
+    def is_era_processed(self, target_datasets: List[str] = None) -> bool:
+        """
+        Check if era is already processed for target datasets.
+        
+        Args:
+            target_datasets: Datasets to check (None = all datasets)
+            
+        Returns:
+            True if era is fully processed
+        """
+        return self.state_manager.is_era_fully_processed(self.era_filename, target_datasets)
+
+    def get_pending_datasets_for_era(self, target_datasets: List[str] = None) -> List[str]:
+        """
+        Get list of datasets that still need processing for this era.
+        
+        Args:
+            target_datasets: Datasets to check (None = all datasets)
+            
+        Returns:
+            List of pending dataset names
+        """
+        return self.state_manager.get_pending_datasets(self.era_filename, target_datasets)

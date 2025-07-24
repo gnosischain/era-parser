@@ -1,16 +1,18 @@
 # Era Parser - Beacon Chain Era File Parser
 
-A modular, extensible parser for Gnosis/Ethereum beacon chain era files supporting multiple networks, forks, and export formats with **remote era file processing**.
+A modular, extensible parser for Gnosis/Ethereum beacon chain era files supporting multiple networks, forks, and export formats with **remote era file processing** and **granular ClickHouse state management**.
 
 ## Features
 
 - 🌐 **Multi-Network Support**: Mainnet, Gnosis, Sepolia
 - 🔄 **All Fork Support**: Phase 0, Altair, Bellatrix, Capella, Deneb, Electra, Fulu (example)
-- 📊 **Multiple Export Formats**: JSON, JSONL, CSV, Parquet
+- 📊 **Multiple Export Formats**: JSON, JSONL, CSV, Parquet, ClickHouse
 - 🎯 **Selective Data Extraction**: Extract specific data types
 - 📁 **Flexible Output**: Single files or separate files per data type
 - 🚀 **Batch Processing**: Process multiple era files at once with wildcards
 - 🌍 **Remote Era Processing**: Download and process era files from remote URLs
+- 🗄️ **ClickHouse Integration**: Direct export to ClickHouse with granular dataset tracking
+- 📈 **Era State Management**: Granular tracking of processing status per dataset
 - 🐳 **Docker Support**: Easy containerized deployment and execution
 - 🧩 **Modular Architecture**: Easy to extend with new forks and networks
 - ⚡ **High Performance**: Memory-efficient streaming processing
@@ -57,7 +59,7 @@ cd era-parser
 
 # Copy and configure environment
 cp .env.example .env
-# Edit .env with your ERA_BASE_URL for remote processing
+# Edit .env with your ERA_BASE_URL and ClickHouse settings
 
 # Build the Docker image
 docker build -t era-parser:latest .
@@ -89,6 +91,19 @@ era-parser gnosis-02607-fe3b60d1.era all-blocks data.csv --separate
 era-parser gnosis-02607-fe3b60d1.era transactions txs.parquet
 ```
 
+#### ClickHouse Export
+
+```bash
+# Export all data types to ClickHouse (automatically separate tables)
+era-parser gnosis-02607-fe3b60d1.era all-blocks --export clickhouse
+
+# Export specific data type to ClickHouse
+era-parser gnosis-02607-fe3b60d1.era transactions --export clickhouse
+
+# Export sync aggregates to ClickHouse
+era-parser gnosis-02607-fe3b60d1.era sync_aggregates --export clickhouse
+```
+
 #### Remote Era Processing
 
 Set up remote processing by configuring the base URL:
@@ -97,27 +112,48 @@ Set up remote processing by configuring the base URL:
 # Set the remote era files base URL
 export ERA_BASE_URL=https://era-files.com
 
-# Process a range of remote eras
-era-parser --remote gnosis 1082-1100 all-blocks gnosis_data.parquet --separate
+# Process a range of remote eras to ClickHouse
+era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse
 
 # Process from era 1082 until no more files found
-era-parser --remote gnosis 1082+ transactions txs.csv
+era-parser --remote gnosis 1082+ transactions --export clickhouse
+
+# Process to files with separate data types
+era-parser --remote gnosis 1082-1100 all-blocks gnosis_data.parquet --separate
 
 # Download only (no processing)
 era-parser --remote gnosis 1082-1100 --download-only
 
 # Resume previous processing
-era-parser --remote gnosis 1082+ all-blocks data.parquet --resume
+era-parser --remote gnosis 1082+ all-blocks --export clickhouse --resume
+```
+
+#### Era State Management
+
+```bash
+# Check era processing status
+era-parser --era-status gnosis
+era-parser --era-status all
+
+# View failed datasets
+era-parser --era-failed gnosis
+era-parser --era-failed all 50
+
+# Clean up stale processing entries
+era-parser --era-cleanup 30
+
+# Check specific era file status
+era-parser --era-check gnosis-02607-fe3b60d1.era
 ```
 
 #### Batch Processing (Local Files)
 
 ```bash
-# Process all Gnosis era files in current directory
-era-parser --batch 'gnosis-*.era' all-blocks gnosis_dataset.parquet
+# Process all Gnosis era files in current directory to ClickHouse
+era-parser --batch 'gnosis-*.era' all-blocks --export clickhouse
 
 # Process files in a specific directory
-era-parser --batch /data/era_files/ transactions tx_analysis.csv
+era-parser --batch /data/era_files/ transactions --export clickhouse
 
 # Process era range with separate files per data type
 era-parser --batch 'mainnet-026*.era' all-blocks era_26xx.parquet --separate
@@ -134,45 +170,46 @@ cp gnosis-02607-fe3b60d1.era ./era-files/
 # Show era file statistics
 docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era stats
 
-# Parse specific block
-docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era block 21348352
-
-# Export all blocks to JSON
-docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era all-blocks blocks.json
+# Export all blocks to ClickHouse
+docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era all-blocks --export clickhouse
 
 # Export with separate files per data type
 docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era all-blocks data.csv --separate
 
-# Extract only transactions
-docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era transactions txs.csv
-
-# Extract only withdrawals
-docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era withdrawals withdrawals.parquet
-
-# Extract only attestations  
-docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era attestations attestations.json
+# Extract only transactions to ClickHouse
+docker-compose run --rm era-parser /app/era-files/gnosis-02607-fe3b60d1.era transactions --export clickhouse
 ```
 
 #### Remote Processing
 
 ```bash
-# Process era range with separate files
-docker-compose run --rm era-parser --remote gnosis 1082-1100 all-blocks remote_data.parquet --separate
+# Process era range to ClickHouse with granular state tracking
+docker-compose run --rm era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse
 
 # Process from era until end with resume
-docker-compose run --rm era-parser --remote gnosis 1082+ transactions txs.csv --resume
+docker-compose run --rm era-parser --remote gnosis 1082+ transactions --export clickhouse --resume
 
-# Process single era
+# Process single era to files
 docker-compose run --rm era-parser --remote gnosis 1082 all-blocks single_era.json
 
 # Download only (no processing)
 docker-compose run --rm era-parser --remote gnosis 1082-1100 --download-only
+```
 
-# Show remote progress
-docker-compose run --rm era-parser --remote-progress gnosis
+#### Era State Management
 
-# Clear remote progress
-docker-compose run --rm era-parser --remote-clear gnosis
+```bash
+# Show era processing status
+docker-compose run --rm era-parser --era-status gnosis
+
+# Show failed datasets
+docker-compose run --rm era-parser --era-failed gnosis
+
+# Clean up stale processing
+docker-compose run --rm era-parser --era-cleanup
+
+# Check specific era status
+docker-compose run --rm era-parser --era-check /app/era-files/your-file.era
 ```
 
 #### Interactive Shell
@@ -184,7 +221,8 @@ docker-compose run --rm shell
 # Inside the shell:
 era-parser --help
 era-parser /app/era-files/your-file.era stats
-era-parser --remote mainnet 2600 transactions mainnet_txs.csv
+era-parser --remote mainnet 2600 transactions --export clickhouse
+era-parser --era-status all
 ```
 
 ## Usage
@@ -196,29 +234,68 @@ era-parser --remote mainnet 2600 transactions mainnet_txs.csv
 era-parser <era_file> <command> [options]
 
 # Local batch processing
-era-parser --batch <pattern> <command> <base_output> [--separate]
+era-parser --batch <pattern> <command> <base_output> [--separate] [--export clickhouse]
 
 # Remote era processing
-era-parser --remote <network> <era_range> <command> <output> [flags]
+era-parser --remote <network> <era_range> <command> [<output>] [flags]
+
+# Era state management
+era-parser --era-status <network|all>
+era-parser --era-failed <network|all> [limit]
+era-parser --era-cleanup [timeout_minutes]
+era-parser --era-check <era_file>
 
 # Remote utility commands
 era-parser --remote-progress <network>
 era-parser --remote-clear <network>
 ```
 
+### ClickHouse Configuration
+
+Set up ClickHouse connection in your environment:
+
+```bash
+# Required ClickHouse settings
+export CLICKHOUSE_HOST=your-clickhouse-host.com
+export CLICKHOUSE_PASSWORD=your-password
+
+# Optional ClickHouse settings
+export CLICKHOUSE_PORT=8443
+export CLICKHOUSE_USER=default
+export CLICKHOUSE_DATABASE=beacon_chain
+export CLICKHOUSE_SECURE=true
+```
+
+Or create a `.env` file:
+
+```bash
+# .env file
+CLICKHOUSE_HOST=your-clickhouse-host.com
+CLICKHOUSE_PASSWORD=your-password
+CLICKHOUSE_PORT=8443
+CLICKHOUSE_USER=default
+CLICKHOUSE_DATABASE=beacon_chain
+CLICKHOUSE_SECURE=true
+
+# Remote era processing
+ERA_BASE_URL=https://era-files.com
+ERA_CLEANUP_AFTER_PROCESS=true
+ERA_MAX_RETRIES=3
+```
+
 ### Remote Era Processing Commands
 
 #### Process Remote Eras
 ```bash
-era-parser --remote <network> <era_range> <command> <output> [flags]
+era-parser --remote <network> <era_range> <command> [<output>] [flags]
 ```
 
 **Parameters:**
 - `<network>`: Network name (`gnosis`, `mainnet`, `sepolia`)
 - `<era_range>`: Era range specification (see formats below)
-- `<command>`: Processing command (`all-blocks`, `transactions`, `withdrawals`, `attestations`)
-- `<output>`: Output filename/path
-- `[flags]`: Optional flags (`--separate`, `--resume`)
+- `<command>`: Processing command (`all-blocks`, `transactions`, `withdrawals`, `attestations`, `sync_aggregates`)
+- `<output>`: Output filename/path (not used for ClickHouse)
+- `[flags]`: Optional flags (`--separate`, `--resume`, `--export clickhouse`)
 
 #### Era Range Formats
 
@@ -232,16 +309,33 @@ era-parser --remote <network> <era_range> <command> <output> [flags]
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| **Process eras** | Download and process | `era-parser --remote gnosis 1082-1100 all-blocks data.parquet` |
+| **Process to ClickHouse** | Download and process to database | `era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse` |
+| **Process to files** | Download and process to files | `era-parser --remote gnosis 1082-1100 all-blocks data.parquet --separate` |
 | **Download only** | Download without processing | `era-parser --remote gnosis 1082-1100 --download-only` |
-| **Show progress** | Display processing status | `era-parser --remote-progress gnosis` |
-| **Clear progress** | Reset processing state | `era-parser --remote-clear gnosis` |
+| **Resume processing** | Continue from where left off | `era-parser --remote gnosis 1082+ all-blocks --export clickhouse --resume` |
+
+### Era State Management Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| **Show status** | Display processing progress | `era-parser --era-status gnosis` |
+| **Show failures** | List failed datasets | `era-parser --era-failed gnosis 20` |
+| **Cleanup stale** | Reset stuck processing entries | `era-parser --era-cleanup 30` |
+| **Check era** | Status of specific era file | `era-parser --era-check era-file.era` |
 
 ### Environment Configuration
 
 Create a `.env` file in your project root:
 
 ```bash
+# Required: ClickHouse connection
+CLICKHOUSE_HOST=your-clickhouse-host.com
+CLICKHOUSE_PASSWORD=your-password
+CLICKHOUSE_PORT=8443
+CLICKHOUSE_USER=default
+CLICKHOUSE_DATABASE=beacon_chain
+CLICKHOUSE_SECURE=true
+
 # Required: Base URL for remote era files
 ERA_BASE_URL=https://era-files.com
 
@@ -258,6 +352,8 @@ ERA_MAX_RETRIES=3
 Or set environment variables directly:
 
 ```bash
+export CLICKHOUSE_HOST=your-clickhouse-host.com
+export CLICKHOUSE_PASSWORD=your-password
 export ERA_BASE_URL=https://era-files.com
 export ERA_DOWNLOAD_DIR=./temp_era_files
 export ERA_CLEANUP_AFTER_PROCESS=true
@@ -269,10 +365,47 @@ export ERA_CLEANUP_AFTER_PROCESS=true
 |---------|-------------|---------------------|---------------|
 | `stats` | Show era file statistics | `era-parser era.era stats` | N/A |
 | `block <slot>` | Parse specific block | `era-parser era.era block 21348352` | N/A |
-| `all-blocks` | Export all block data | `era-parser era.era all-blocks data.json` | `era-parser --batch *.era all-blocks dataset.parquet` |
-| `transactions` | Extract only transactions | `era-parser era.era transactions txs.csv` | `era-parser --batch gnosis-*.era transactions tx_data.csv` |
-| `withdrawals` | Extract only withdrawals | `era-parser era.era withdrawals w.parquet` | `era-parser --batch mainnet-*.era withdrawals wd_data.parquet` |
-| `attestations` | Extract only attestations | `era-parser era.era attestations atts.json` | `era-parser --batch *.era attestations att_analysis.csv` |
+| `all-blocks` | Export all block data | `era-parser era.era all-blocks data.json` | `era-parser --batch *.era all-blocks --export clickhouse` |
+| `transactions` | Extract only transactions | `era-parser era.era transactions --export clickhouse` | `era-parser --batch gnosis-*.era transactions --export clickhouse` |
+| `withdrawals` | Extract only withdrawals | `era-parser era.era withdrawals w.parquet` | `era-parser --batch mainnet-*.era withdrawals --export clickhouse` |
+| `attestations` | Extract only attestations | `era-parser era.era attestations --export clickhouse` | `era-parser --batch *.era attestations --export clickhouse` |
+| `sync_aggregates` | Extract only sync aggregates | `era-parser era.era sync_aggregates --export clickhouse` | `era-parser --batch *.era sync_aggregates --export clickhouse` |
+
+## ClickHouse Integration
+
+### Database Schema
+
+The parser creates normalized tables in ClickHouse:
+
+- **`blocks`** - Beacon chain block headers and metadata
+- **`sync_aggregates`** - Sync committee data (Altair+ forks)
+- **`execution_payloads`** - Execution layer block data (Bellatrix+ forks)
+- **`transactions`** - Individual transaction records
+- **`withdrawals`** - Validator withdrawal records
+- **`attestations`** - Validator attestation data
+- **`deposits`** - Validator deposit data
+- **`voluntary_exits`** - Validator exit requests
+- **`proposer_slashings`** - Proposer slashing events
+- **`attester_slashings`** - Attester slashing events
+- **`bls_changes`** - BLS to execution address changes
+- **`blob_commitments`** - Blob KZG commitments (Deneb+ forks)
+- **`execution_requests`** - Execution layer requests (Electra+ forks)
+
+### Era State Tracking
+
+The parser maintains granular processing state:
+
+- **`era_processing_state`** - Detailed tracking per era file and dataset
+- **`era_processing_progress`** - View showing era-level completion status
+- **`dataset_processing_progress`** - View showing dataset-level progress
+
+### Granular Processing Benefits
+
+1. **Partial Era Processing**: If one dataset fails, others can still succeed
+2. **Smart Resume**: Only processes datasets that haven't been completed
+3. **Dataset-Specific Retries**: Retry only failed datasets, not entire eras
+4. **Progress Visibility**: See exactly which datasets are complete/failed/processing
+5. **Automatic Filtering**: Remote processing skips already-completed eras
 
 ## Docker Configuration
 
@@ -293,6 +426,8 @@ era-parser/
 ### Environment Variables for Docker
 
 Set in `.env` file:
+- `CLICKHOUSE_HOST`: ClickHouse server hostname
+- `CLICKHOUSE_PASSWORD`: ClickHouse password
 - `ERA_BASE_URL`: Required for remote processing
 - `ERA_CLEANUP_AFTER_PROCESS`: Delete downloaded files after processing (default: true)
 - `ERA_MAX_RETRIES`: Maximum download retries (default: 3)
@@ -301,34 +436,62 @@ All output files are saved to `./output/` on your host machine.
 
 ## Remote Processing Examples
 
-### Basic Remote Processing
+### Basic Remote Processing to ClickHouse
 ```bash
 # Set environment
+export CLICKHOUSE_HOST=your-clickhouse-host.com
+export CLICKHOUSE_PASSWORD=your-password
 export ERA_BASE_URL=https://era-files.com
 
-# Process era range with separate files per data type
-era-parser --remote gnosis 1082-1100 all-blocks gnosis_analysis.parquet --separate
+# Process era range with granular dataset tracking
+era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse
 ```
 
-**Output files:**
+**Results in ClickHouse:**
+- Separate tables for each dataset type
+- Granular tracking of processing status
+- Automatic resume capability if interrupted
+
+### Advanced ClickHouse Workflows
+
+#### Research Use Cases
+```bash
+# Extract all transactions for MEV analysis
+era-parser --remote mainnet 2500+ transactions --export clickhouse --resume
+
+# Get comprehensive validator data
+era-parser --remote gnosis 1000-1100 all-blocks --export clickhouse
+
+# Process specific datasets only
+era-parser --remote gnosis 1082-1090 sync_aggregates --export clickhouse
+era-parser --remote gnosis 1082-1090 attestations --export clickhouse
 ```
-output/gnosis_analysis_era_01082_blocks.parquet
-output/gnosis_analysis_era_01082_transactions.parquet
-output/gnosis_analysis_era_01082_withdrawals.parquet
-output/gnosis_analysis_era_01083_blocks.parquet
-...
+
+#### Monitoring and Management
+```bash
+# Check processing status
+era-parser --era-status gnosis
+
+# View failed datasets for retry
+era-parser --era-failed gnosis
+
+# Clean up stale processing entries
+era-parser --era-cleanup 60
+
+# Resume failed datasets only
+era-parser --remote gnosis 1082+ all-blocks --export clickhouse --resume
 ```
 
 ### Open-Ended Processing with Resume
 ```bash
 # Start processing from era 1082 until no more files
-era-parser --remote gnosis 1082+ transactions gnosis_txs.csv
+era-parser --remote gnosis 1082+ all-blocks --export clickhouse
 
 # If interrupted, resume with:
-era-parser --remote gnosis 1082+ transactions gnosis_txs.csv --resume
+era-parser --remote gnosis 1082+ all-blocks --export clickhouse --resume
 
 # Check progress
-era-parser --remote-progress gnosis
+era-parser --era-status gnosis
 ```
 
 ### Download First, Process Later
@@ -339,55 +502,17 @@ era-parser --remote gnosis 1082-1090 --download-only
 # Files are downloaded to ERA_DOWNLOAD_DIR
 # Process later using local commands:
 for era in temp_era_files/gnosis-*.era; do
-    era-parser "$era" all-blocks "processed_$(basename $era .era).json"
+    era-parser "$era" all-blocks --export clickhouse
 done
 ```
 
-### Research Use Cases with Remote Processing
-
-#### MEV Analysis
+### Mixed File and ClickHouse Processing
 ```bash
-# Extract all transactions from remote era range
-era-parser --remote mainnet 2500+ transactions mev_dataset.parquet --resume
+# Process some eras to files for analysis
+era-parser --remote gnosis 1082-1085 all-blocks analysis.parquet --separate
 
-# Get fee recipient patterns across multiple eras
-era-parser --remote mainnet 2400-2500 all-blocks fee_analysis.csv --separate
-```
-
-#### Validator Performance Studies
-```bash
-# Extract attestation data across Gnosis era range
-era-parser --remote gnosis 1000+ attestations validator_performance.csv --resume
-
-# Get comprehensive validator data
-era-parser --remote gnosis 1000-1100 all-blocks validator_study.parquet --separate
-```
-
-#### Time Series Analysis
-```bash
-# Process sequential eras for longitudinal studies
-era-parser --remote gnosis 0+ all-blocks complete_timeseries.parquet --separate --resume
-```
-
-### Progress Management
-
-```bash
-# Show processing progress for a network
-era-parser --remote-progress gnosis
-```
-
-**Output:**
-```
-📊 Remote Processing Progress (gnosis)
-   Processed eras: 15
-   Failed eras: 2
-   Last run: 2025-01-27 14:30:22
-   Progress file: /tmp/era_downloads/.era_progress_gnosis.json
-```
-
-```bash
-# Clear progress to start fresh
-era-parser --remote-clear gnosis
+# Process rest to ClickHouse for long-term storage  
+era-parser --remote gnosis 1086+ all-blocks --export clickhouse --resume
 ```
 
 ## Output Formats
@@ -400,6 +525,24 @@ Files are auto-detected by extension:
 | **JSON Lines** | `.jsonl` | One JSON per line | Streaming, large datasets |
 | **CSV** | `.csv` | Flattened tabular data | Excel, pandas, analysis |
 | **Parquet** | `.parquet` | Compressed columnar | Big data, analytics, ML |
+| **ClickHouse** | `--export clickhouse` | Normalized database tables | Production, analytics, queries |
+
+### ClickHouse Output Structure
+
+When using `--export clickhouse`:
+
+```sql
+-- Era-level progress tracking
+SELECT * FROM era_processing_progress WHERE network = 'gnosis';
+
+-- Dataset-level progress
+SELECT * FROM dataset_processing_progress WHERE network = 'gnosis';
+
+-- Query actual data
+SELECT COUNT(*) FROM blocks WHERE timestamp_utc >= '2024-01-01';
+SELECT fee_recipient, COUNT(*) FROM transactions GROUP BY fee_recipient LIMIT 10;
+SELECT COUNT(*) FROM sync_aggregates WHERE slot >= 1000000;
+```
 
 ### Remote Processing Output Structure
 
@@ -411,6 +554,7 @@ output/
 ├── gnosis_analysis_era_01082_transactions.parquet
 ├── gnosis_analysis_era_01082_withdrawals.parquet
 ├── gnosis_analysis_era_01082_attestations.parquet
+├── gnosis_analysis_era_01082_sync_aggregates.parquet
 ├── gnosis_analysis_era_01083_blocks.parquet
 ├── gnosis_analysis_era_01083_transactions.parquet
 ├── ...
@@ -419,28 +563,87 @@ output/
 
 ### Data Output Examples
 
-**Transactions (`data_transactions.csv`):**
-```csv
-slot,block_number,transaction_index,transaction_hash,fee_recipient,gas_used,timestamp
-21348352,39771042,0,0x02f903d464...,0x5112d584a1c72fc250...,226309,1745735100
-21348352,39771042,1,0x02f901f464...,0x5112d584a1c72fc250...,195562,1745735100
+**Transactions Table (`transactions`):**
+```sql
+SELECT slot, block_number, transaction_hash, fee_recipient, gas_used 
+FROM transactions 
+WHERE slot >= 21348352 
+LIMIT 5;
 ```
 
-**Withdrawals (`data_withdrawals.csv`):**
-```csv
-slot,block_number,withdrawal_index,validator_index,address,amount,timestamp
-21348352,39771042,84223338,74400,0xfc9b67b6034f6b306ea9bd8ec1baf3efa2490394,37969609,1745735100
-21348352,39771042,84223339,74401,0xfc9b67b6034f6b306ea9bd8ec1baf3efa2490394,17027278,1745735100
+**Withdrawals Table (`withdrawals`):**
+```sql
+SELECT slot, validator_index, address, amount, timestamp_utc 
+FROM withdrawals 
+WHERE amount > 1000000000 
+LIMIT 5;
 ```
 
-**Attestations (`data_attestations.csv`):**
-```csv
-slot,attestation_index,committee_index,source_epoch,target_epoch,beacon_block_root
-21348352,0,33,1334270,1334271,0x4726093400094404407e84ed9d0bc5b0586980bc8240f576ce109f51cfa756cd
-21348352,1,10,1334270,1334271,0x4726093400094404407e84ed9d0bc5b0586980bc8240f576ce109f51cfa756cd
+**Sync Aggregates Table (`sync_aggregates`):**
+```sql
+SELECT slot, length(sync_committee_bits), timestamp_utc 
+FROM sync_aggregates 
+WHERE slot >= 21348352 
+LIMIT 5;
+```
+
+**Attestations Table (`attestations`):**
+```sql
+SELECT slot, committee_index, source_epoch, target_epoch 
+FROM attestations 
+WHERE slot >= 21348352 
+LIMIT 5;
 ```
 
 ## Error Handling and Troubleshooting
+
+### ClickHouse Connection Issues
+
+#### Missing Environment Variables
+```
+❌ Configuration error: CLICKHOUSE_HOST and CLICKHOUSE_PASSWORD must be set
+```
+
+**Solution:**
+```bash
+export CLICKHOUSE_HOST=your-clickhouse-host.com
+export CLICKHOUSE_PASSWORD=your-password
+```
+
+#### Connection Timeout
+```bash
+# Test ClickHouse connection
+era-parser --era-status all
+```
+
+If this fails, check:
+- Network connectivity to ClickHouse server
+- Correct host and port
+- Valid credentials
+- Firewall settings
+
+### Era State Management Issues
+
+#### Stale Processing Entries
+```bash
+# Clean up entries stuck in "processing" state
+era-parser --era-cleanup 30
+
+# Check what was reset
+era-parser --era-status gnosis
+```
+
+#### Resume Not Working
+```bash
+# Check current status
+era-parser --era-status gnosis
+
+# Check specific era
+era-parser --era-check gnosis-02607-fe3b60d1.era
+
+# Force retry failed datasets
+era-parser --era-failed gnosis
+```
 
 ### Remote Processing Issues
 
@@ -465,13 +668,13 @@ export ERA_DOWNLOAD_DIR=/data/era_temp
 
 #### Resume Interrupted Processing
 ```bash
-# Check what's been processed
-era-parser --remote-progress gnosis
+# Check what's been processed in ClickHouse
+era-parser --era-status gnosis
 
 # Resume from where you left off
-era-parser --remote gnosis 1082+ all-blocks data.parquet --resume
+era-parser --remote gnosis 1082+ all-blocks --export clickhouse --resume
 
-# Clear progress if needed
+# Clear file progress if needed (keeps ClickHouse state)
 era-parser --remote-clear gnosis
 ```
 
@@ -485,13 +688,13 @@ mkdir -p output
 **Pattern not matching files:**
 ```bash
 # Use quotes if shell expansion is problematic
-era-parser --batch 'gnosis-*.era' all-blocks data.json
+era-parser --batch 'gnosis-*.era' all-blocks --export clickhouse
 ```
 
 **Memory issues:**
 ```bash
-# Use separate files mode to reduce memory usage
-era-parser --batch era-*.era all-blocks data.parquet --separate
+# Use ClickHouse export to reduce memory usage
+era-parser --batch era-*.era all-blocks --export clickhouse
 ```
 
 ### Docker Issues
@@ -507,23 +710,30 @@ sudo chown -R $USER:$USER ./output
 echo "ERA_MAX_RETRIES=10" >> .env
 ```
 
-**Memory issues:**
+**ClickHouse connection from Docker:**
 ```bash
-# Use separate files mode for large datasets
-docker-compose run --rm era-parser --remote gnosis 1082-1090 all-blocks data.parquet --separate
+# Make sure ClickHouse host is accessible from container
+# Use host networking if needed
+docker-compose run --network host era-parser --era-status all
 ```
 
 ## Performance Tips
 
+### For ClickHouse Processing
+- ClickHouse export is the most efficient for large datasets
+- Granular state tracking prevents reprocessing completed work
+- Use `--resume` for long-running jobs to handle interruptions
+- Process in reasonable chunks rather than enormous ranges
+
 ### For Remote Processing
-- Use `--separate` for better memory efficiency with large datasets
-- Use Parquet format for optimal compression and speed  
+- Use ClickHouse export for production workloads
+- Use `--separate` files for analysis workflows
 - Use `--resume` for long-running jobs to handle interruptions
 - Process in reasonable chunks rather than enormous ranges
 
 ### For Local Processing
 - Process era ranges in batches for very large datasets
-- Use separate files mode for multiple data types
+- Use ClickHouse export for multiple data types
 - Monitor disk space when processing many eras
 
 ### For Docker Usage
@@ -556,12 +766,15 @@ era-parser/
 │       ├── deneb.py     # Deneb parser
 │       ├── electra.py   # Electra parser
 │       └── fulu.py      # Fulu parser (example)
-├── export/          # Export formats (JSON, CSV, Parquet)
-│   ├── base.py          # Common export functionality
-│   ├── json_exporter.py # JSON/JSONL export
-│   ├── csv_exporter.py  # CSV export
-│   └── parquet_exporter.py # Parquet export
-├── cli.py          # Command line interface with remote support
+├── export/          # Export formats (JSON, CSV, Parquet, ClickHouse)
+│   ├── base.py              # Common export functionality
+│   ├── json_exporter.py     # JSON/JSONL export
+│   ├── csv_exporter.py      # CSV export
+│   ├── parquet_exporter.py  # Parquet export
+│   ├── clickhouse_exporter.py   # ClickHouse export with state management
+│   ├── clickhouse_service.py    # ClickHouse connection and table management
+│   └── era_state_manager.py     # Granular era processing state tracking
+├── cli.py          # Command line interface with remote and state management
 ├── Dockerfile      # Docker container configuration
 └── docker-compose.yml # Docker Compose services
 ```
@@ -569,10 +782,12 @@ era-parser/
 ### Key Components
 
 - **EraReader**: Handles local era file ingestion and record extraction
-- **RemoteEraDownloader**: Downloads and processes remote era files
+- **RemoteEraDownloader**: Downloads and processes remote era files with state integration
 - **BlockParser**: Main parsing coordinator that delegates to fork parsers
 - **Fork Parsers**: Specialized parsers for each fork (Phase0, Altair, etc.)
 - **Exporters**: Format-specific output handlers with consistent interface
+- **ClickHouseExporter**: Direct database export with granular state tracking
+- **EraStateManager**: Granular tracking of processing status per era file and dataset
 - **Config System**: Centralized network and fork configuration
 - **Docker Support**: Containerized deployment with Docker and Docker Compose
 
@@ -676,11 +891,11 @@ FORK_PARSERS = {
 
 ```bash
 # Automatically detects and parses Fulu fork
-era-parser fulu-era-12345.era all-blocks fulu_data.json
-era-parser --remote fulu 1000+ transactions fulu_txs.csv --resume
+era-parser fulu-era-12345.era all-blocks --export clickhouse
+era-parser --remote fulu 1000+ transactions --export clickhouse --resume
 
 # Works with Docker too
-docker-compose run --rm era-parser /app/era-files/fulu-era-12345.era all-blocks fulu_data.json
+docker-compose run --rm era-parser /app/era-files/fulu-era-12345.era all-blocks --export clickhouse
 ```
 
 ## Contributing
@@ -701,6 +916,7 @@ docker-compose run --rm era-parser /app/era-files/fulu-era-12345.era all-blocks 
 - Maintain backwards compatibility
 - Consider batch processing impact for new features
 - Test both native and Docker deployments
+- Test ClickHouse integration for new features
 
 ## License
 

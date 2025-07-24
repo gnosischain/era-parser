@@ -347,13 +347,73 @@ class RemoteEraDownloader:
                 print(f"   🗑️  Cleaned up: {local_path}")
             except Exception as e:
                 print(f"   ⚠️  Cleanup failed: {e}")
+
+    def get_processed_eras_from_state(self, network: str, start_era: int = None, end_era: int = None) -> set:
+        """
+        Get list of fully processed era numbers from era state manager.
+        
+        Args:
+            network: Network name
+            start_era: Start era filter
+            end_era: End era filter
+            
+        Returns:
+            Set of era numbers that are fully processed
+        """
+        try:
+            from ..export.era_state_manager import EraStateManager
+            state_manager = EraStateManager()
+            
+            # Get era processing progress
+            summary = state_manager.get_processing_summary(network)
+            
+            processed_eras = set()
+            
+            # Query for fully completed eras in range
+            import clickhouse_connect
+            client = clickhouse_connect.get_client(
+                host=state_manager.host,
+                port=state_manager.port,
+                username=state_manager.user,
+                password=state_manager.password,
+                database=state_manager.database,
+                secure=state_manager.secure,
+                verify=False
+            )
+            
+            # Build query with range filters
+            query = f"""
+            SELECT era_number
+            FROM {state_manager.database}.era_processing_progress
+            WHERE network = '{network}'
+              AND completed_datasets = total_datasets
+              AND completed_datasets > 0
+            """
+            
+            if start_era is not None:
+                query += f" AND era_number >= {start_era}"
+            if end_era is not None:
+                query += f" AND era_number <= {end_era}"
+                
+            query += " ORDER BY era_number"
+            
+            result = client.query(query)
+            processed_eras = {row[0] for row in result.result_rows}
+            
+            print(f"📋 Found {len(processed_eras)} fully processed eras in era state for {network}")
+            
+            return processed_eras
+            
+        except Exception as e:
+            print(f"⚠️  Could not check era state: {e}")
+            return set()
     
     def process_era_range(self, start_era: int, end_era: Optional[int], 
                      command: str, base_output: str, separate_files: bool = False,
                      resume: bool = False, export_type: str = "file",
                      processed_eras: set = None) -> Dict[str, Any]:
         """
-        Download and process a range of era files
+        Download and process a range of era files with enhanced state management
         
         Args:
             start_era: Starting era number
@@ -389,10 +449,17 @@ class RemoteEraDownloader:
             available_eras = [(era, url) for era, url in available_eras if era not in processed_eras_file]
             print(f"📋 Resume mode: {len(available_eras)} eras remaining after filtering file processed ones")
         
-        # Filter out ClickHouse processed eras
-        if processed_eras:
+        # Filter out ClickHouse processed eras using new state manager
+        if export_type == "clickhouse":
+            try:
+                state_processed_eras = self.get_processed_eras_from_state(self.network, start_era, end_era)
+                available_eras = [(era, url) for era, url in available_eras if era not in state_processed_eras]
+                print(f"📋 Era state filter: {len(available_eras)} eras remaining after filtering state processed ones")
+            except Exception as e:
+                print(f"⚠️  Could not filter by era state: {e}")
+        elif processed_eras:  # Legacy ClickHouse filter
             available_eras = [(era, url) for era, url in available_eras if era not in processed_eras]
-            print(f"📋 ClickHouse filter: {len(available_eras)} eras remaining after filtering ClickHouse processed ones")
+            print(f"📋 Legacy ClickHouse filter: {len(available_eras)} eras remaining")
         
         # Process each era
         processed_count = 0

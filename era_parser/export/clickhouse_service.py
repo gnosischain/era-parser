@@ -49,20 +49,6 @@ class ClickHouseService:
 
     def _ensure_tables(self):
         """Create properly normalized tables"""
-        
-        # Era tracking table
-        self.client.command("""
-        CREATE TABLE IF NOT EXISTS era_files_processed (
-            era_number UInt64,
-            network String,
-            file_hash String,
-            status String,
-            error_message String DEFAULT '',
-            records_inserted UInt64 DEFAULT 0,
-            processed_at DateTime DEFAULT now()
-        ) ENGINE = MergeTree()
-        ORDER BY (network, era_number, processed_at)
-        """)
 
         # Blocks table - ONLY beacon chain block data (no sync_aggregate fields)
         self.client.command("""
