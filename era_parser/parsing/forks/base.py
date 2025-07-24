@@ -46,7 +46,69 @@ class BaseForkParser(ABC):
             base_offsets.append(offset)
         
         return base_offsets, start_pos + 20  # 5 offsets * 4 bytes
-    
+ 
+    def parse_deposit(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """
+        Parse a single deposit
+        
+        Structure:
+        - proof: 33 × 32 bytes = 1056 bytes (Vector[Bytes32, 33])
+        - deposit_data: 184 bytes
+        - pubkey: 48 bytes
+        - withdrawal_credentials: 32 bytes  
+        - amount: 8 bytes
+        - signature: 96 bytes
+        """
+        try:
+            if len(data) < 1240:
+                return None
+            
+            pos = 0
+            
+            # Parse proof: Vector[Bytes32, 33] - exactly 33 hashes of 32 bytes each
+            proof = []
+            for i in range(33):
+                if pos + 32 > len(data):
+                    return None
+                hash_bytes = data[pos:pos+32]
+                proof.append("0x" + hash_bytes.hex())
+                pos += 32
+            
+            # Parse deposit data (should be exactly 184 bytes remaining)
+            if pos + 184 > len(data):
+                return None
+            
+            deposit_data_raw = data[pos:pos+184]
+            data_pos = 0
+            
+            # pubkey: Bytes48 (48 bytes)
+            pubkey = "0x" + deposit_data_raw[data_pos:data_pos+48].hex()
+            data_pos += 48
+            
+            # withdrawal_credentials: Bytes32 (32 bytes)
+            withdrawal_credentials = "0x" + deposit_data_raw[data_pos:data_pos+32].hex()
+            data_pos += 32
+            
+            # amount: uint64 (8 bytes)
+            amount = str(read_uint64_at(deposit_data_raw, data_pos))
+            data_pos += 8
+            
+            # signature: Bytes96 (96 bytes)
+            signature = "0x" + deposit_data_raw[data_pos:data_pos+96].hex()
+            
+            return {
+                "proof": proof,
+                "data": {
+                    "pubkey": pubkey,
+                    "withdrawal_credentials": withdrawal_credentials,
+                    "amount": amount,
+                    "signature": signature
+                }
+            }
+            
+        except Exception as e:
+            return None
+
     def parse_attestation(self, data: bytes) -> Optional[Dict[str, Any]]:
         """Parse a single attestation"""
         try:

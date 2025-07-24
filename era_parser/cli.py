@@ -13,7 +13,7 @@ from .config import detect_network_from_filename, get_network_config
 from .ingestion.remote_downloader import RemoteEraDownloader, get_remote_era_downloader
 
 class EraParserCLI:
-    """Simple CLI with full data extraction"""
+    """Simple CLI with full data extraction and single timestamp"""
     
     def __init__(self):
         self.network = None
@@ -236,14 +236,14 @@ class EraParserCLI:
         return blocks
     
     def extract_all_data(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Extract ALL data from blocks with full structure and proper normalization"""
+        """Extract ALL data from blocks with SIMPLIFIED single timestamp approach"""
         block_records = self.era_reader.get_block_records()
         
-        # Initialize all possible data types including execution_payloads and sync_aggregates
+        # Initialize all possible data types
         all_data = {
             'blocks': [],
-            'execution_payloads': [],  # Separate execution payload table
-            'sync_aggregates': [],     # NEW: separate sync aggregate table
+            'execution_payloads': [],  
+            'sync_aggregates': [],     
             'transactions': [],
             'withdrawals': [],
             'attestations': [],
@@ -258,7 +258,7 @@ class EraParserCLI:
         
         successful = 0
         
-        print("🌍 FULL DATA EXTRACTION - Getting everything with proper normalization...")
+        print("🌍 FULL DATA EXTRACTION - SIMPLIFIED single timestamp approach...")
         
         for i, (slot, compressed_data) in enumerate(block_records):
             if (i + 1) % 100 == 0:
@@ -275,7 +275,7 @@ class EraParserCLI:
             sync_aggregate = body.get("sync_aggregate", {})
             timestamp_utc = self._get_block_timestamp(block, slot)
             
-            # Blocks - ONLY beacon chain data (no execution payload or sync aggregate fields)
+            # Blocks - ONLY beacon chain data with SINGLE timestamp
             all_data['blocks'].append({
                 "slot": slot,
                 "proposer_index": message.get("proposer_index"),
@@ -283,7 +283,7 @@ class EraParserCLI:
                 "state_root": message.get("state_root"),
                 "signature": block.get("data", {}).get("signature"),
                 "version": block.get("version"),
-                "timestamp_utc": timestamp_utc,
+                "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 "randao_reveal": body.get("randao_reveal"),
                 "graffiti": body.get("graffiti"),
                 "eth1_deposit_root": body.get("eth1_data", {}).get("deposit_root"),
@@ -291,17 +291,17 @@ class EraParserCLI:
                 "eth1_block_hash": body.get("eth1_data", {}).get("block_hash"),
             })
             
-            # NEW: Sync Aggregates - separate normalized table (Altair+ only)
-            if sync_aggregate:  # Only if sync aggregate exists
+            # Sync Aggregates - SINGLE timestamp
+            if sync_aggregate:
                 all_data['sync_aggregates'].append({
                     "slot": slot,
                     "sync_committee_bits": sync_aggregate.get("sync_committee_bits"),
                     "sync_committee_signature": sync_aggregate.get("sync_committee_signature"),
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 })
             
-            # Execution Payloads - separate normalized table (Bellatrix+ only)
-            if execution_payload:  # Only if execution payload exists
+            # Execution Payloads - SINGLE timestamp (NO duplicate timestamp field)
+            if execution_payload:
                 all_data['execution_payloads'].append({
                     "slot": slot,
                     "parent_hash": execution_payload.get("parent_hash"),
@@ -313,7 +313,7 @@ class EraParserCLI:
                     "block_number": execution_payload.get("block_number"),
                     "gas_limit": execution_payload.get("gas_limit"),
                     "gas_used": execution_payload.get("gas_used"),
-                    "timestamp": execution_payload.get("timestamp"),
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp - NO duplicate!
                     "base_fee_per_gas": execution_payload.get("base_fee_per_gas"),
                     "block_hash": execution_payload.get("block_hash"),
                     "blob_gas_used": execution_payload.get("blob_gas_used"),
@@ -321,7 +321,7 @@ class EraParserCLI:
                     "extra_data": execution_payload.get("extra_data"),
                 })
             
-            # Transactions
+            # Transactions - SINGLE timestamp
             transactions = execution_payload.get("transactions", [])
             for tx_index, tx_hash in enumerate(transactions):
                 all_data['transactions'].append({
@@ -334,11 +334,10 @@ class EraParserCLI:
                     "gas_limit": execution_payload.get("gas_limit"),
                     "gas_used": execution_payload.get("gas_used"),
                     "base_fee_per_gas": execution_payload.get("base_fee_per_gas"),
-                    "timestamp": execution_payload.get("timestamp"),
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp - NO duplicate
                 })
             
-            # Withdrawals
+            # Withdrawals - SINGLE timestamp
             withdrawals = execution_payload.get("withdrawals", [])
             for withdrawal in withdrawals:
                 all_data['withdrawals'].append({
@@ -349,11 +348,10 @@ class EraParserCLI:
                     "validator_index": withdrawal.get("validator_index"),
                     "address": withdrawal.get("address"),
                     "amount": withdrawal.get("amount"),
-                    "timestamp": execution_payload.get("timestamp"),
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp - NO duplicate
                 })
             
-            # Attestations - FULL nested data
+            # Attestations - FULL nested data with SINGLE timestamp
             attestations = body.get("attestations", [])
             for att_index, attestation in enumerate(attestations):
                 att_data = attestation.get("data", {})
@@ -372,25 +370,32 @@ class EraParserCLI:
                     "source_root": source.get("root"),
                     "target_epoch": target.get("epoch"),
                     "target_root": target.get("root"),
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 })
             
-            # Deposits - FULL data
+            # Deposits - Handle properly parsed deposit structure with SINGLE timestamp
             deposits = body.get("deposits", [])
             for deposit_idx, deposit in enumerate(deposits):
                 deposit_data = deposit.get("data", {})
-                all_data['deposits'].append({
+                proof = deposit.get("proof", [])
+                
+                # Create deposit record with unnested data fields
+                deposit_record = {
                     "slot": slot,
                     "deposit_index": deposit_idx,
-                    "proof": json.dumps(deposit.get("proof", [])),
-                    "pubkey": deposit_data.get("pubkey"),
-                    "withdrawal_credentials": deposit_data.get("withdrawal_credentials"),
-                    "amount": deposit_data.get("amount"),
-                    "signature": deposit_data.get("signature"),
-                    "timestamp_utc": timestamp_utc,
-                })
+                    # Unnested data fields (moved from data.* to top level)
+                    "pubkey": deposit_data.get("pubkey", ""),
+                    "withdrawal_credentials": deposit_data.get("withdrawal_credentials", ""),
+                    "amount": deposit_data.get("amount", "0"),
+                    "signature": deposit_data.get("signature", ""),
+                    # Proof as JSON array (much cleaner than 33 individual columns)
+                    "proof": json.dumps(proof) if proof else "[]",
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                }
+                
+                all_data['deposits'].append(deposit_record)
             
-            # Voluntary Exits - FULL data
+            # Voluntary Exits - FULL data with SINGLE timestamp
             voluntary_exits = body.get("voluntary_exits", [])
             for exit_idx, voluntary_exit in enumerate(voluntary_exits):
                 exit_message = voluntary_exit.get("message", {})
@@ -400,10 +405,10 @@ class EraParserCLI:
                     "signature": voluntary_exit.get("signature"),
                     "epoch": exit_message.get("epoch"),
                     "validator_index": exit_message.get("validator_index"),
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 })
             
-            # Proposer Slashings - FULL data
+            # Proposer Slashings - FULL data with SINGLE timestamp
             proposer_slashings = body.get("proposer_slashings", [])
             for slash_idx, slashing in enumerate(proposer_slashings):
                 signed_header_1 = slashing.get("signed_header_1", {})
@@ -424,10 +429,10 @@ class EraParserCLI:
                     "header_2_state_root": signed_header_2.get("message", {}).get("state_root"),
                     "header_2_body_root": signed_header_2.get("message", {}).get("body_root"),
                     "header_2_signature": signed_header_2.get("signature"),
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 })
             
-            # Attester Slashings - FULL data
+            # Attester Slashings - FULL data with SINGLE timestamp
             attester_slashings = body.get("attester_slashings", [])
             for slash_idx, slashing in enumerate(attester_slashings):
                 attestation_1 = slashing.get("attestation_1", {})
@@ -448,10 +453,10 @@ class EraParserCLI:
                     "att_2_source_epoch": attestation_2.get("data", {}).get("source", {}).get("epoch"),
                     "att_2_target_epoch": attestation_2.get("data", {}).get("target", {}).get("epoch"),
                     "att_2_signature": attestation_2.get("signature"),
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 })
             
-            # BLS Changes - FULL data (Capella+)
+            # BLS Changes - FULL data with SINGLE timestamp (Capella+)
             bls_changes = body.get("bls_to_execution_changes", [])
             for change_idx, bls_change in enumerate(bls_changes):
                 change_message = bls_change.get("message", {})
@@ -462,20 +467,20 @@ class EraParserCLI:
                     "validator_index": change_message.get("validator_index"),
                     "from_bls_pubkey": change_message.get("from_bls_pubkey"),
                     "to_execution_address": change_message.get("to_execution_address"),
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 })
             
-            # Blob Commitments - FULL data (Deneb+)
+            # Blob Commitments - FULL data with SINGLE timestamp (Deneb+)
             blob_commitments = body.get("blob_kzg_commitments", [])
             for commit_idx, commitment in enumerate(blob_commitments):
                 all_data['blob_commitments'].append({
                     "slot": slot,
                     "commitment_index": commit_idx,
                     "commitment": commitment,
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 })
             
-            # Execution Requests - FULL data (Electra+)
+            # Execution Requests - FULL data with SINGLE timestamp (Electra+)
             execution_requests = body.get("execution_requests", {})
             
             # Deposit requests
@@ -490,7 +495,7 @@ class EraParserCLI:
                     "amount": deposit_req.get("amount"),
                     "signature": deposit_req.get("signature"),
                     "deposit_request_index": deposit_req.get("index"),
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 })
             
             # Withdrawal requests
@@ -503,7 +508,7 @@ class EraParserCLI:
                     "source_address": withdrawal_req.get("source_address"),
                     "validator_pubkey": withdrawal_req.get("validator_pubkey"),
                     "amount": withdrawal_req.get("amount"),
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 })
             
             # Consolidation requests  
@@ -516,10 +521,10 @@ class EraParserCLI:
                     "source_address": consolidation_req.get("source_address"),
                     "source_pubkey": consolidation_req.get("source_pubkey"),
                     "target_pubkey": consolidation_req.get("target_pubkey"),
-                    "timestamp_utc": timestamp_utc,
+                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 })
         
-        print(f"✅ Successfully processed {successful} blocks with FULL normalized data extraction")
+        print(f"✅ Successfully processed {successful} blocks with SIMPLIFIED single timestamp extraction")
         return all_data
     
     def extract_specific_data(self, data_type: str) -> List[Dict[str, Any]]:
@@ -788,7 +793,7 @@ def main():
         print("  - ClickHouse export ALWAYS creates separate tables (like --separate)")
         print("  - Parquet with --separate creates one file per data type")
         print("  - All nested data is fully extracted and preserved")
-        print("  - sync_aggregates are now extracted as separate table/files")
+        print("  - SIMPLIFIED: Only single timestamp_utc per table for monthly partitioning")
         sys.exit(1)
     
     cli = EraParserCLI()

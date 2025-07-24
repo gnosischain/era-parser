@@ -4,11 +4,14 @@ import requests
 import tempfile
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import time
+import concurrent.futures
+import xml.etree.ElementTree as ET
+import re
 
 class RemoteEraDownloader:
-    """Downloads and processes era files from remote URLs"""
+    """Optimized downloads and processes era files from remote URLs with fast discovery"""
     
     def __init__(self, base_url: str, network: str, download_dir: Optional[str] = None, 
                  cleanup: bool = True, max_retries: int = 3):
@@ -27,6 +30,10 @@ class RemoteEraDownloader:
         self.cleanup = cleanup
         self.max_retries = max_retries
         
+        # Parse URL to determine if it's S3
+        parsed_url = urlparse(self.base_url)
+        self.is_s3 = 's3' in parsed_url.hostname if parsed_url.hostname else False
+        
         # Setup download directory
         if download_dir:
             self.download_dir = Path(download_dir)
@@ -39,9 +46,10 @@ class RemoteEraDownloader:
         self.progress_file = self.download_dir / f".era_progress_{network}.json"
         self.progress_data = self._load_progress()
         
-        print(f"🌐 Remote Era Downloader initialized")
+        print(f"🌐 Optimized Remote Era Downloader initialized")
         print(f"   Base URL: {self.base_url}")
         print(f"   Network: {self.network}")
+        print(f"   S3 Detected: {self.is_s3}")
         print(f"   Download dir: {self.download_dir}")
         print(f"   Cleanup after processing: {self.cleanup}")
     
@@ -66,52 +74,380 @@ class RemoteEraDownloader:
         with open(self.progress_file, 'w') as f:
             json.dump(self.progress_data, f, indent=2)
     
-    def _construct_era_url(self, era_number: int) -> str:
-        """Construct URL for era file"""
-        # Format: network-XXXXX-hash.era (we don't know the hash, so we'll search)
-        era_str = f"{era_number:05d}"
-        return f"{self.base_url}/{self.network}-{era_str}-"
+    def discover_era_files(self, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
+        """
+        OPTIMIZED: Fast discovery of available era files using bulk S3 listing or parallel requests
+        
+        Args:
+            start_era: Starting era number
+            end_era: Ending era number (None = discover until not found)
+            
+        Returns:
+            List of (era_number, url) tuples
+        """
+        print(f"🚀 Fast discovery starting from era {start_era}")
+        
+        if self.is_s3:
+            # OPTIMIZATION 1: Use S3 bulk listing for much faster discovery
+            return self._discover_s3_bulk(start_era, end_era)
+        else:
+            # OPTIMIZATION 2: Use parallel requests for non-S3 URLs
+            return self._discover_parallel(start_era, end_era)
     
-    def _find_era_file(self, era_number: int) -> Optional[str]:
-        """Find the actual era file URL by testing common hash patterns"""
+    def _discover_s3_bulk(self, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
+        """
+        OPTIMIZATION: Bulk S3 listing with proper pagination to get ALL era files
+        """
+        print(f"📦 Using S3 bulk listing for ultra-fast discovery")
+        
+        all_available_eras = []
+        continuation_token = None
+        
+        try:
+            session = requests.Session()
+            session.headers.update({'User-Agent': 'era-parser/1.0'})
+            
+            # Paginate through ALL era files using S3 continuation tokens
+            page = 1
+            while True:
+                # Build S3 list request with prefix for the network
+                list_url = f"{self.base_url}/?list-type=2&prefix={self.network}-&max-keys=1000"
+                
+                # Add continuation token for pagination (with proper URL encoding)
+                if continuation_token:
+                    import urllib.parse
+                    encoded_token = urllib.parse.quote(continuation_token, safe='')
+                    list_url += f"&continuation-token={encoded_token}"
+                
+                print(f"   🔍 Fetching S3 bucket listing (page {page})...")
+                response = session.get(list_url, timeout=30)
+                
+                if response.status_code == 200:
+                    page_eras = self._parse_s3_listing(response.text, start_era, end_era)
+                    all_available_eras.extend(page_eras)
+                    
+                    print(f"   📊 Page {page}: Found {len(page_eras)} era files")
+                    
+                    # Check if there are more results
+                    continuation_token = self._extract_continuation_token(response.text)
+                    if not continuation_token:
+                        break  # No more pages
+                    
+                    page += 1
+                    
+                    # Safety check to prevent infinite loops (increased limit for large buckets)
+                    if page > 500:  # Max 500,000 files (500 pages * 1000 each)
+                        print(f"   ⚠️  Reached maximum page limit, stopping pagination")
+                        break
+                        
+                else:
+                    print(f"   ⚠️  S3 listing page {page} failed (status {response.status_code})")
+                    if page == 1:
+                        # If first page fails, fall back to parallel
+                        print(f"   ⚠️  First page failed, falling back to parallel discovery")
+                        return self._discover_parallel(start_era, end_era)
+                    else:
+                        # If later page fails, return what we have so far
+                        print(f"   ⚠️  Pagination failed, returning {len(all_available_eras)} files found so far")
+                        break
+            
+            print(f"   🎯 Total found: {len(all_available_eras)} era files across {page} pages")
+            return all_available_eras
+                
+        except Exception as e:
+            print(f"   ⚠️  S3 bulk listing failed: {e}, falling back to parallel discovery")
+            return self._discover_parallel(start_era, end_era)
+    
+    def _extract_continuation_token(self, xml_content: str) -> Optional[str]:
+        """
+        Extract NextContinuationToken from S3 XML response
+        """
+        try:
+            # Try XML parsing first
+            root = ET.fromstring(xml_content)
+            
+            # Look for NextContinuationToken with different namespace approaches
+            for ns_prefix in ['', 's3:']:
+                ns_dict = {'': 'http://s3.amazonaws.com/doc/2006-03-01/', 's3': 'http://s3.amazonaws.com/doc/2006-03-01/'} if ns_prefix else {}
+                token_elem = root.find(f'.//{ns_prefix}NextContinuationToken', ns_dict)
+                if token_elem is not None and token_elem.text:
+                    return token_elem.text
+            
+            # Try without namespace
+            token_elem = root.find('.//NextContinuationToken')
+            if token_elem is not None and token_elem.text:
+                return token_elem.text
+                
+        except ET.ParseError:
+            # If XML parsing fails, use regex
+            import re
+            match = re.search(r'<NextContinuationToken>([^<]+)</NextContinuationToken>', xml_content)
+            if match:
+                return match.group(1)
+        
+        return None
+    
+    def _parse_s3_listing(self, xml_content: str, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
+        """
+        Parse S3 XML listing to extract era file URLs
+        """
+        available_eras = []
+        
+        try:
+            # Try XML parsing first
+            root = ET.fromstring(xml_content)
+            
+            # Handle different XML namespaces
+            namespaces = {
+                '': 'http://s3.amazonaws.com/doc/2006-03-01/',
+                's3': 'http://s3.amazonaws.com/doc/2006-03-01/'
+            }
+            
+            # Find all Key elements
+            keys = []
+            for ns_prefix in ['', 's3:']:
+                ns_dict = namespaces if ns_prefix else {}
+                contents = root.findall(f'.//{ns_prefix}Contents', ns_dict)
+                for content_elem in contents:
+                    key_elem = content_elem.find(f'{ns_prefix}Key', ns_dict)
+                    if key_elem is not None and key_elem.text:
+                        keys.append(key_elem.text)
+            
+            # Also try without namespace
+            if not keys:
+                for content_elem in root.findall('.//Contents'):
+                    key_elem = content_elem.find('Key')
+                    if key_elem is not None and key_elem.text:
+                        keys.append(key_elem.text)
+                        
+        except ET.ParseError:
+            # If XML parsing fails, use regex on raw content
+            print(f"   📝 XML parsing failed, using regex extraction")
+            keys = self._extract_keys_with_regex(xml_content)
+        
+        # Process found keys and filter by era range
+        era_pattern = rf'{self.network}-(\d{{5}})-[a-f0-9]{{8}}\.era'
+        
+        for key in keys:
+            match = re.match(era_pattern, key)
+            if match:
+                era_number = int(match.group(1))
+                
+                # Apply era range filters
+                if era_number < start_era:
+                    continue
+                if end_era is not None and era_number > end_era:
+                    continue
+                
+                url = f"{self.base_url}/{key}"
+                available_eras.append((era_number, url))
+        
+        # Sort by era number
+        available_eras.sort(key=lambda x: x[0])
+        
+        return available_eras
+    
+    def _extract_keys_with_regex(self, content: str) -> List[str]:
+        """
+        Extract S3 keys using regex when XML parsing fails
+        """
+        keys = []
+        
+        # Try different patterns for S3 listing formats
+        patterns = [
+            rf'<Key>({self.network}-\d{{5}}-[a-f0-9]{{8}}\.era)</Key>',
+            rf'>({self.network}-\d{{5}}-[a-f0-9]{{8}}\.era)<',
+            rf'{self.network}-\d{{5}}-[a-f0-9]{{8}}\.era'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, content, re.IGNORECASE)
+            if matches:
+                keys.extend(matches)
+                break
+        
+        return list(set(keys))  # Remove duplicates
+    
+    def _discover_parallel(self, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
+        """
+        OPTIMIZATION: Parallel discovery for non-S3 URLs or S3 fallback - finds ALL era files
+        """
+        print(f"⚡ Using parallel discovery")
+        
+        available_eras = []
+        
+        # For open-ended ranges, we need to discover the actual range first
+        if end_era is None:
+            print(f"   🔍 Open-ended range detected, discovering actual range...")
+            # Start with a reasonable estimate and expand as needed
+            estimated_end = self._estimate_max_era(start_era)
+            print(f"   📊 Estimated range: {start_era} to {estimated_end}")
+            era_range = list(range(start_era, estimated_end + 1))
+        else:
+            era_range = list(range(start_era, end_era + 1))
+        
+        print(f"   📋 Checking {len(era_range)} eras in total")
+        
+        # OPTIMIZATION: Process in parallel batches
+        batch_size = 100  # Increased batch size for better throughput
+        
+        for batch_start in range(0, len(era_range), batch_size):
+            batch_eras = era_range[batch_start:batch_start + batch_size]
+            
+            print(f"   🔍 Checking eras {batch_eras[0]}-{batch_eras[-1]} ({len(batch_eras)} in parallel)")
+            
+            batch_results = self._check_eras_parallel(batch_eras)
+            found_in_batch = len(batch_results)
+            available_eras.extend(batch_results)
+            
+            print(f"   📊 Batch result: {found_in_batch}/{len(batch_eras)} found")
+            
+            # For open-ended ranges, continue until we hit significant gaps
+            if end_era is None:
+                # If we find very few files in recent batches, we might be near the end
+                if found_in_batch < 5 and batch_eras[0] > start_era + 1000:
+                    # Check if we've hit a significant gap
+                    consecutive_empty_batches = self._count_consecutive_empty_batches(available_eras, batch_eras[0], batch_size)
+                    if consecutive_empty_batches >= 3:  # 3 mostly empty batches = likely at the end
+                        print(f"   🛑 Found {consecutive_empty_batches} consecutive mostly-empty batches, likely reached end")
+                        break
+        
+        available_eras.sort(key=lambda x: x[0])
+        print(f"   🎯 Parallel discovery complete: {len(available_eras)} era files found")
+        return available_eras
+    
+    def _estimate_max_era(self, start_era: int) -> int:
+        """
+        Estimate the maximum era number by checking a few high values
+        """
+        # For Gnosis, we know there are 2600+ eras, so let's start with a reasonable estimate
+        test_eras = [1000, 2000, 3000, 4000, 5000]
+        
+        max_found = start_era
+        
+        print(f"   🎯 Quick estimation check...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_era = {executor.submit(self._check_single_era, era): era for era in test_eras}
+            
+            for future in concurrent.futures.as_completed(future_to_era, timeout=30):
+                era = future_to_era[future]
+                try:
+                    result = future.result()
+                    if result:  # Era exists
+                        max_found = max(max_found, era)
+                        print(f"   ✅ Era {era} exists")
+                    else:
+                        print(f"   ❌ Era {era} not found")
+                except Exception:
+                    print(f"   ❌ Era {era} check failed")
+        
+        # Add buffer above the highest found era
+        estimated_max = max_found + 1000
+        print(f"   📊 Highest confirmed era: {max_found}, estimating max: {estimated_max}")
+        return estimated_max
+    
+    def _count_consecutive_empty_batches(self, available_eras: List[Tuple[int, str]], current_era: int, batch_size: int) -> int:
+        """
+        Count how many recent batches had very few results
+        """
+        if not available_eras:
+            return 0
+        
+        # Look at the last few batches worth of eras
+        recent_eras = [era for era, _ in available_eras if era >= current_era - (batch_size * 3)]
+        batches_checked = (current_era - (current_era - len(recent_eras))) // batch_size
+        
+        if batches_checked == 0:
+            return 0
+        
+        avg_per_batch = len(recent_eras) / max(1, batches_checked)
+        
+        # If average is very low, consider it "empty"
+        return 3 if avg_per_batch < 5 else 0
+    
+    def _check_eras_parallel(self, era_numbers: List[int]) -> List[Tuple[int, str]]:
+        """
+        Check multiple eras in parallel using ThreadPoolExecutor
+        """
+        available_eras = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            # Submit all era checks
+            future_to_era = {
+                executor.submit(self._check_single_era, era_num): era_num 
+                for era_num in era_numbers
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_era, timeout=60):
+                era_num = future_to_era[future]
+                try:
+                    result = future.result()
+                    if result:
+                        available_eras.append((era_num, result))
+                except Exception as e:
+                    print(f"   ❌ Era {era_num} check failed: {e}")
+        
+        return available_eras
+    
+    def _check_single_era(self, era_number: int) -> Optional[str]:
+        """
+        Check if a single era exists and return its URL
+        """
+        try:
+            # Build the URL pattern for this era
+            era_str = f"{era_number:05d}"
+            
+            # Method 1: Try pattern matching for S3-like URLs
+            if self.is_s3:
+                # For S3, try a HEAD request with common patterns
+                common_patterns = [
+                    f"{self.base_url}/{self.network}-{era_str}.era",  # Without hash
+                ]
+                
+                for url in common_patterns:
+                    if self._url_exists(url):
+                        return url
+            
+            # Method 2: Try directory listing approach
+            return self._discover_era_file_with_hash_fast(era_number)
+            
+        except Exception as e:
+            return None
+    
+    def _url_exists(self, url: str, timeout: int = 5) -> bool:
+        """
+        Fast check if URL exists using HEAD request
+        """
+        try:
+            response = requests.head(url, timeout=timeout, allow_redirects=True)
+            return response.status_code == 200
+        except:
+            return False
+    
+    def _discover_era_file_with_hash_fast(self, era_number: int) -> Optional[str]:
+        """
+        Fast discovery of era file with hash - optimized version
+        """
         era_str = f"{era_number:05d}"
         
-        # First, try to get a directory listing or use a pattern
-        # For S3, we'll try common approaches
-        
-        # Method 1: Try a HEAD request to see if we can find the file
-        # We'll try a few common hash lengths (8 chars is most common)
-        base_pattern = f"{self.base_url}/{self.network}-{era_str}-"
-        
-        # Try to find the file by making a request without the hash and see if we get redirected
-        # or by trying common hash patterns
-        test_url = f"{base_pattern}*.era"  # This won't work directly
-        
-        # More practical approach: Try a few requests with different strategies
-        session = requests.Session()
-        session.headers.update({'User-Agent': 'era-parser/1.0'})
-        
-        # Strategy 1: Try common hash patterns (if we know them)
-        # Strategy 2: Try to list the bucket (if public)
-        # Strategy 3: Make educated guesses
-        
-        # For now, let's implement a brute force approach for the last few characters
-        # This is not ideal but works for the immediate need
-        
-        # Try requesting the base URL pattern and see what we get
         try:
-            # Try without hash first (might work for some setups)
-            test_url = f"{self.base_url}/{self.network}-{era_str}.era"
-            response = session.head(test_url, timeout=10)
-            if response.status_code == 200:
-                return test_url
-        except:
-            pass
-        
-        # If that doesn't work, we need a different strategy
-        # For S3 buckets, we might need to implement XML parsing of bucket listings
-        # For now, let's return None and handle this in the caller
-        return None
+            # Quick S3 prefix listing for this specific era
+            if self.is_s3:
+                list_url = f"{self.base_url}/?list-type=2&prefix={self.network}-{era_str}-&max-keys=5"
+                response = requests.get(list_url, timeout=10)
+                
+                if response.status_code == 200:
+                    # Quick regex search for the file
+                    pattern = rf'{self.network}-{era_str}-[a-f0-9]{{8}}\.era'
+                    matches = re.findall(pattern, response.text, re.IGNORECASE)
+                    if matches:
+                        return f"{self.base_url}/{matches[0]}"
+            
+            return None
+            
+        except Exception:
+            return None
     
     def _download_file(self, url: str, local_path: Path) -> bool:
         """Download a file with retry logic"""
@@ -153,159 +489,6 @@ class RemoteEraDownloader:
                     return False
         
         return False
-    
-    def discover_era_files(self, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
-        """
-        Discover available era files in range
-        
-        Args:
-            start_era: Starting era number
-            end_era: Ending era number (None = discover until not found)
-            
-        Returns:
-            List of (era_number, url) tuples
-        """
-        print(f"🔍 Discovering era files starting from era {start_era}")
-        
-        available_eras = []
-        current_era = start_era
-        consecutive_failures = 0
-        max_consecutive_failures = 5  # Stop after 5 consecutive failures
-        
-        session = requests.Session()
-        session.headers.update({'User-Agent': 'era-parser/1.0'})
-        
-        while True:
-            if end_era is not None and current_era > end_era:
-                break
-                
-            # Try to find this era file
-            era_str = f"{current_era:05d}"
-            
-            # Method 1: Try to get S3 bucket listing (if public)
-            found_url = self._discover_era_file_with_hash(session, current_era)
-            
-            if found_url:
-                available_eras.append((current_era, found_url))
-                consecutive_failures = 0
-                print(f"   ✅ Found era {current_era}: {found_url}")
-            else:
-                consecutive_failures += 1
-                print(f"   ❌ Era {current_era} not found (consecutive failures: {consecutive_failures})")
-                
-                if consecutive_failures >= max_consecutive_failures:
-                    print(f"   🛑 Stopping discovery after {max_consecutive_failures} consecutive failures")
-                    break
-            
-            current_era += 1
-            
-            # Small delay to be nice to the server
-            time.sleep(0.1)
-        
-        print(f"🎯 Discovery complete: found {len(available_eras)} era files")
-        return available_eras
-    
-    def _discover_era_file_with_hash(self, session: requests.Session, era_number: int) -> Optional[str]:
-        """
-        Try to discover the actual era file URL with hash suffix
-        
-        For S3 buckets, files are named like: network-XXXXX-hash.era
-        We need to find the hash part.
-        """
-        era_str = f"{era_number:05d}"
-        
-        # Method 1: Try without hash first (some setups might work)
-        simple_url = f"{self.base_url}/{self.network}-{era_str}.era"
-        try:
-            response = session.head(simple_url, timeout=10)
-            if response.status_code == 200:
-                return simple_url
-        except:
-            pass
-        
-        # Method 2: Try to get S3 bucket listing
-        try:
-            # For S3, we can try to list objects with a prefix
-            # This works if the bucket allows public listing
-            list_url = f"{self.base_url}/?list-type=2&prefix={self.network}-{era_str}-"
-            response = session.get(list_url, timeout=10)
-            
-            if response.status_code == 200:
-                content = response.text
-                
-                # Try to parse as S3 XML response
-                if '<ListBucketResult' in content or '<Contents>' in content:
-                    import xml.etree.ElementTree as ET
-                    try:
-                        root = ET.fromstring(content)
-                        
-                        # Handle different XML namespaces
-                        namespaces = {
-                            '': 'http://s3.amazonaws.com/doc/2006-03-01/',
-                            's3': 'http://s3.amazonaws.com/doc/2006-03-01/'
-                        }
-                        
-                        # Try to find Contents elements
-                        for ns_prefix in ['', 's3:']:
-                            contents = root.findall(f'.//{ns_prefix}Contents', namespaces if ns_prefix else {})
-                            for content_elem in contents:
-                                key_elem = content_elem.find(f'{ns_prefix}Key', namespaces if ns_prefix else {})
-                                if key_elem is not None:
-                                    key = key_elem.text
-                                    if key and key.startswith(f"{self.network}-{era_str}-") and key.endswith('.era'):
-                                        return f"{self.base_url}/{key}"
-                        
-                        # Also try without namespace
-                        for content_elem in root.findall('.//Contents'):
-                            key_elem = content_elem.find('Key')
-                            if key_elem is not None:
-                                key = key_elem.text
-                                if key and key.startswith(f"{self.network}-{era_str}-") and key.endswith('.era'):
-                                    return f"{self.base_url}/{key}"
-                                    
-                    except ET.ParseError:
-                        # If XML parsing fails, try regex on the raw content
-                        import re
-                        pattern = rf'<Key>({self.network}-{era_str}-[a-f0-9]{{8}}.era)</Key>'
-                        matches = re.findall(pattern, content, re.IGNORECASE)
-                        if matches:
-                            return f"{self.base_url}/{matches[0]}"
-                
-                # If not XML, try to find the filename in plain text or HTML
-                import re
-                # Look for filenames that match our pattern
-                pattern = rf'{self.network}-{era_str}-[a-f0-9]{{8}}\.era'
-                matches = re.findall(pattern, content, re.IGNORECASE)
-                if matches:
-                    return f"{self.base_url}/{matches[0]}"
-        
-        except Exception as e:
-            print(f"   🔍 Bucket listing failed: {e}")
-        
-        # Method 3: Try alternative S3 listing format
-        try:
-            # Try the older S3 API format
-            list_url = f"{self.base_url}/?prefix={self.network}-{era_str}-&max-keys=10"
-            response = session.get(list_url, timeout=10)
-            
-            if response.status_code == 200:
-                content = response.text
-                import re
-                pattern = rf'{self.network}-{era_str}-[a-f0-9]{{8}}\.era'
-                matches = re.findall(pattern, content, re.IGNORECASE)
-                if matches:
-                    return f"{self.base_url}/{matches[0]}"
-        except:
-            pass
-        
-        # Method 4: Try some educated guesses based on common patterns
-        # This is a last resort - try a few common hash formats
-        print(f"   🎲 Trying educated guesses for era {era_number}")
-        
-        # Since we don't know the hash, we can't really guess it
-        # But let's try a few approaches that might work for some servers
-        
-        return None
     
     def download_era(self, era_number: int, url: str) -> Optional[str]:
         """
@@ -364,12 +547,7 @@ class RemoteEraDownloader:
             from ..export.era_state_manager import EraStateManager
             state_manager = EraStateManager()
             
-            # Get era processing progress
-            summary = state_manager.get_processing_summary(network)
-            
-            processed_eras = set()
-            
-            # Query for fully completed eras in range
+            # Query for fully completed eras in range using the era_processing_progress view
             import clickhouse_connect
             client = clickhouse_connect.get_client(
                 host=state_manager.host,
@@ -381,7 +559,7 @@ class RemoteEraDownloader:
                 verify=False
             )
             
-            # Build query with range filters
+            # Build query with range filters using the progress view
             query = f"""
             SELECT era_number
             FROM {state_manager.database}.era_processing_progress
@@ -436,7 +614,7 @@ class RemoteEraDownloader:
         print(f"   Resume: {resume}")
         print(f"   Export type: {export_type}")
         
-        # Discover available eras
+        # OPTIMIZED: Fast discovery of available eras
         available_eras = self.discover_era_files(start_era, end_era)
         
         if not available_eras:
@@ -449,7 +627,7 @@ class RemoteEraDownloader:
             available_eras = [(era, url) for era, url in available_eras if era not in processed_eras_file]
             print(f"📋 Resume mode: {len(available_eras)} eras remaining after filtering file processed ones")
         
-        # Filter out ClickHouse processed eras using new state manager
+        # Filter out ClickHouse processed eras using era state manager
         if export_type == "clickhouse":
             try:
                 state_processed_eras = self.get_processed_eras_from_state(self.network, start_era, end_era)
@@ -457,9 +635,9 @@ class RemoteEraDownloader:
                 print(f"📋 Era state filter: {len(available_eras)} eras remaining after filtering state processed ones")
             except Exception as e:
                 print(f"⚠️  Could not filter by era state: {e}")
-        elif processed_eras:  # Legacy ClickHouse filter
+        elif processed_eras:  # Legacy filter for other export types
             available_eras = [(era, url) for era, url in available_eras if era not in processed_eras]
-            print(f"📋 Legacy ClickHouse filter: {len(available_eras)} eras remaining")
+            print(f"📋 Legacy filter: {len(available_eras)} eras remaining")
         
         # Process each era
         processed_count = 0

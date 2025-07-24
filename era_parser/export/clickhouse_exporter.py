@@ -1,4 +1,4 @@
-"""Optimized ClickHouse exporter with direct data preparation and bulk loading"""
+"""Optimized ClickHouse exporter with direct data preparation and single timestamp"""
 
 import json
 import logging
@@ -14,7 +14,7 @@ from .era_state_manager import EraStateManager
 logger = logging.getLogger(__name__)
 
 class ClickHouseExporter(BaseExporter):
-    """Optimized ClickHouse exporter with direct data preparation and bulk loading"""
+    """Optimized ClickHouse exporter with direct data preparation and single timestamp"""
 
     def __init__(self, era_info: Dict[str, Any], era_file_path: str = None):
         """
@@ -70,7 +70,7 @@ class ClickHouseExporter(BaseExporter):
 
     def load_all_data_types(self, all_data: Dict[str, List[Dict[str, Any]]]):
         """
-        Optimized loading of all data types with minimal DataFrame overhead
+        Optimized loading of all data types with minimal DataFrame overhead and single timestamp
         """
         if not all_data:
             logger.warning("No data to load")
@@ -161,8 +161,10 @@ class ClickHouseExporter(BaseExporter):
     def _prepare_dataset_direct(self, data_list: List[Dict[str, Any]], 
                               expected_columns: List[str]) -> List[List]:
         """
-        OPTIMIZATION: Direct preparation of data without DataFrame intermediate step
+        SIMPLIFIED: Direct preparation of data with SINGLE timestamp logic
         """
+        from datetime import datetime
+        
         # Pre-identify numeric columns for faster processing
         numeric_columns = {
             'slot', 'era_number', 'block_number', 'proposer_index', 'gas_used', 
@@ -174,13 +176,18 @@ class ClickHouseExporter(BaseExporter):
             'header_2_slot', 'header_2_proposer_index', 'att_1_slot', 'att_1_committee_index',
             'att_1_source_epoch', 'att_1_target_epoch', 'att_2_slot', 'att_2_committee_index',
             'att_2_source_epoch', 'att_2_target_epoch', 'change_index', 'commitment_index',
-            'request_index', 'deposit_request_index', 'records_inserted', 'participating_validators'
+            'request_index', 'deposit_request_index', 'records_inserted', 'participating_validators',
+            'transactions_count', 'withdrawals_count'
         }
         
+        # SIMPLIFIED: Only timestamp_utc is a datetime column - that's it!
         datetime_columns = {'timestamp_utc'}
         
+        # SAFE FALLBACK - never return None
+        SAFE_FALLBACK = datetime(1970, 1, 2)
+        
         bulk_data = []
-        for row in data_list:
+        for row_idx, row in enumerate(data_list):
             row_data = []
             for col in expected_columns:
                 value = row.get(col)
@@ -200,12 +207,25 @@ class ClickHouseExporter(BaseExporter):
                                 row_data.append(int(float(str(value))))
                         except (ValueError, TypeError):
                             row_data.append(0)
+                            
                 elif col in datetime_columns:
-                    # Handle timestamp_utc conversion
+                    # DateTime conversion - ONLY for timestamp_utc
                     converted_dt = self._convert_to_datetime(value)
+                    
+                    # Double-check: if somehow _convert_to_datetime returns None, use fallback
+                    if converted_dt is None:
+                        logger.error(f"Row {row_idx}, Column {col}: _convert_to_datetime returned None! Using fallback. Original value: {value}")
+                        converted_dt = SAFE_FALLBACK
+                    
+                    # Triple-check: ensure it's actually a datetime object
+                    if not isinstance(converted_dt, datetime):
+                        logger.error(f"Row {row_idx}, Column {col}: Expected datetime but got {type(converted_dt)}! Using fallback. Value: {converted_dt}")
+                        converted_dt = SAFE_FALLBACK
+                    
                     row_data.append(converted_dt)
+                    
                 else:
-                    # Fast string conversion
+                    # Everything else is a string - SIMPLE!
                     if value is None:
                         row_data.append('')
                     else:
@@ -216,22 +236,46 @@ class ClickHouseExporter(BaseExporter):
         return bulk_data
 
     def _convert_to_datetime(self, value):
-        """Robust datetime conversion for ClickHouse DateTime columns"""
+        """Robust datetime conversion for ClickHouse DateTime columns with proper range validation"""
         from datetime import datetime
         import pandas as pd
         
+        # ClickHouse DateTime range: [1970-01-01 00:00:00, 2106-02-07 06:28:15]
+        # Use a safe fallback that's well within the range
+        SAFE_FALLBACK = datetime(1970, 1, 2)  # One day after minimum to be safe
+        
         # Handle None, NaN, empty string cases
-        if pd.isna(value) if hasattr(pd, 'isna') else value is None or value == '':
-            return datetime(1970, 1, 1)
+        if value is None or value == '':
+            return SAFE_FALLBACK
+        
+        # Handle pandas NaN
+        if hasattr(pd, 'isna') and pd.isna(value):
+            return SAFE_FALLBACK
         
         # Handle string values
         if isinstance(value, str):
             # Handle empty or default datetime strings
-            if value in ['1970-01-01T00:00:00+00:00', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00']:
-                return datetime(1970, 1, 1)
+            if value in ['1970-01-01T00:00:00+00:00', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00', '0', 'null', 'NULL']:
+                return SAFE_FALLBACK
             
             try:
-                # Parse ISO datetime string
+                # First try to parse as Unix timestamp string (common case for execution payload timestamp)
+                try:
+                    timestamp = int(value)
+                    # Validate timestamp range: 0 to 4294967295 (max 32-bit unsigned int)
+                    # ClickHouse DateTime max is around 4294944000 (2106-02-07)
+                    if 0 < timestamp < 4294944000:  # Valid Unix timestamp range for ClickHouse
+                        return datetime.fromtimestamp(timestamp)
+                    elif timestamp == 0:
+                        return SAFE_FALLBACK
+                    else:
+                        # Timestamp out of range
+                        logger.warning(f"Timestamp {timestamp} out of ClickHouse DateTime range, using fallback")
+                        return SAFE_FALLBACK
+                except (ValueError, TypeError):
+                    pass
+                
+                # Then try ISO datetime string parsing
                 if 'T' in value:
                     # Clean up timezone info for fromisoformat
                     dt_str = value.replace('Z', '')
@@ -244,41 +288,98 @@ class ClickHouseExporter(BaseExporter):
                     if '.' in dt_str:
                         dt_str = dt_str.split('.')[0]  # Remove microseconds
                     
-                    return datetime.fromisoformat(dt_str)
+                    parsed_dt = datetime.fromisoformat(dt_str)
+                    
+                    # Validate parsed datetime is within ClickHouse range
+                    if datetime(1970, 1, 1) <= parsed_dt <= datetime(2106, 2, 7):
+                        return parsed_dt
+                    else:
+                        logger.warning(f"Parsed datetime {parsed_dt} out of ClickHouse range, using fallback")
+                        return SAFE_FALLBACK
                 else:
-                    # Try to parse as Unix timestamp string
+                    # Try to parse as float timestamp string
                     try:
                         timestamp = float(value)
-                        if timestamp > 0 and timestamp < 2147483647:  # Valid Unix timestamp range
+                        if 0 < timestamp < 4294944000:  # Valid Unix timestamp range
                             return datetime.fromtimestamp(timestamp)
                         else:
-                            return datetime(1970, 1, 1)
+                            return SAFE_FALLBACK
                     except (ValueError, TypeError):
-                        return datetime(1970, 1, 1)
-            except (ValueError, TypeError):
-                return datetime(1970, 1, 1)
+                        return SAFE_FALLBACK
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse datetime string '{value}': {e}")
+                return SAFE_FALLBACK
         
         # Handle numeric values (Unix timestamps)
         elif isinstance(value, (int, float)):
             try:
-                if value > 0 and value < 2147483647:  # Valid Unix timestamp range
+                # Validate timestamp range
+                if 0 < value < 4294944000:  # Valid Unix timestamp range for ClickHouse
                     return datetime.fromtimestamp(value)
                 else:
-                    return datetime(1970, 1, 1)
-            except (ValueError, TypeError, OSError):
-                return datetime(1970, 1, 1)
+                    logger.warning(f"Numeric timestamp {value} out of ClickHouse range, using fallback")
+                    return SAFE_FALLBACK
+            except (ValueError, TypeError, OSError) as e:
+                logger.warning(f"Failed to convert timestamp {value}: {e}")
+                return SAFE_FALLBACK
         
         # Handle datetime objects (should already be correct)
-        elif hasattr(value, 'timestamp'):  # datetime-like object
-            return value
+        elif isinstance(value, datetime):
+            # Validate datetime is within ClickHouse range
+            if datetime(1970, 1, 1) <= value <= datetime(2106, 2, 7):
+                return value
+            else:
+                logger.warning(f"Datetime object {value} out of ClickHouse range, using fallback")
+                return SAFE_FALLBACK
         
         # Fallback for any other type
         else:
-            return datetime(1970, 1, 1)
+            logger.warning(f"Unexpected datetime value type: {type(value)} = {value}")
+            return SAFE_FALLBACK
+
+    def _validate_datetime_column(self, bulk_data: List[List], expected_columns: List[str]) -> List[List]:
+        """Validate datetime columns to ensure no None values - SIMPLIFIED single column"""
+        from datetime import datetime
+        
+        datetime_columns = {'timestamp_utc'}  # ONLY timestamp_utc
+        SAFE_FALLBACK = datetime(1970, 1, 2)
+        
+        # Find datetime column indices
+        datetime_indices = []
+        for i, col in enumerate(expected_columns):
+            if col in datetime_columns:
+                datetime_indices.append(i)
+        
+        if not datetime_indices:
+            return bulk_data  # No datetime columns to validate
+        
+        # Validate and fix datetime values
+        fixed_data = []
+        for row in bulk_data:
+            fixed_row = list(row)  # Make a copy
+            
+            for col_idx in datetime_indices:
+                if col_idx < len(fixed_row):
+                    value = fixed_row[col_idx]
+                    
+                    # Check for None or invalid values
+                    if value is None:
+                        logger.warning(f"Found None value in datetime column {expected_columns[col_idx]}, using fallback")
+                        fixed_row[col_idx] = SAFE_FALLBACK
+                    elif not isinstance(value, datetime):
+                        logger.warning(f"Found non-datetime value {type(value)} in datetime column {expected_columns[col_idx]}, converting")
+                        fixed_row[col_idx] = self._convert_to_datetime(value)
+                    elif not (datetime(1970, 1, 1) <= value <= datetime(2106, 2, 7)):
+                        logger.warning(f"Found out-of-range datetime {value} in column {expected_columns[col_idx]}, using fallback")
+                        fixed_row[col_idx] = SAFE_FALLBACK
+            
+            fixed_data.append(fixed_row)
+        
+        return fixed_data
 
     def _direct_bulk_insert(self, bulk_data: List[List], table_name: str) -> int:
         """
-        OPTIMIZATION: Direct bulk insert bypassing DataFrame creation entirely
+        OPTIMIZATION: Direct bulk insert with ClickHouse Cloud reliability
         """
         if not bulk_data:
             logger.info(f"No data to load into {table_name}")
@@ -287,42 +388,95 @@ class ClickHouseExporter(BaseExporter):
         try:
             expected_columns = self.service._get_table_columns(table_name)
             
-            # OPTIMIZATION 2: Use optimized batch sizes based on data volume
-            total_records = len(bulk_data)
+            # VALIDATION: Ensure datetime columns are properly formatted
+            validated_data = self._validate_datetime_column(bulk_data, expected_columns)
             
-            if total_records <= 10000:
-                # Small datasets: single insert
-                self.service.client.insert(table_name, bulk_data, column_names=expected_columns)
-                logger.info(f"Direct bulk inserted {total_records} records into {table_name}")
-                return total_records
+            # OPTIMIZATION: Adaptive batch sizing for ClickHouse Cloud
+            total_records = len(validated_data)
+            
+            # Use smaller batches for problem tables, streaming for large datasets
+            if table_name == 'attestations' and total_records > 10000:
+                return self._cloud_optimized_streaming_insert(validated_data, table_name, expected_columns)
+            elif total_records > 15000:
+                return self._cloud_optimized_streaming_insert(validated_data, table_name, expected_columns)
             else:
-                # Large datasets: use optimized streaming
-                return self._optimized_streaming_insert(bulk_data, table_name, expected_columns)
+                # Small datasets: direct insert with retry
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        self.service.client.insert(table_name, validated_data, column_names=expected_columns)
+                        logger.info(f"Direct bulk inserted {total_records} records into {table_name}")
+                        return total_records
+                    except Exception as e:
+                        logger.warning(f"Insert attempt {attempt + 1}/{max_retries} failed for {table_name}: {e}")
+                        
+                        if attempt < max_retries - 1:
+                            import time
+                            time.sleep(2 ** attempt)
+                            
+                            # Test and reconnect if needed
+                            try:
+                                self.service.client.command("SELECT 1")
+                            except:
+                                logger.info("Reconnecting to ClickHouse...")
+                                self.service.client = self.service._connect()
+                        else:
+                            # Fall back to streaming on final failure
+                            logger.warning(f"All attempts failed, using streaming for {table_name}")
+                            return self._cloud_optimized_streaming_insert(validated_data, table_name, expected_columns)
             
         except Exception as e:
             logger.error(f"Failed to bulk insert into {table_name}: {e}")
             raise
 
-    def _optimized_streaming_insert(self, bulk_data: List[List], table_name: str, 
-                                  expected_columns: List[str]) -> int:
+    def _cloud_optimized_streaming_insert(self, bulk_data: List[List], table_name: str, 
+                                        expected_columns: List[str]) -> int:
         """
-        OPTIMIZATION: Use larger batch sizes and optimized streaming for maximum throughput
+        OPTIMIZATION: Streaming insert optimized for ClickHouse Cloud with adaptive batch sizes
         """
-        # OPTIMIZATION 3: Much larger batch sizes for better throughput
-        batch_size = 100000  # Increased from 100 to 100,000 for maximum throughput
+        # Adaptive batch sizes based on table characteristics
+        if table_name == 'attestations':
+            batch_size = 3000  # Attestations are complex, use smaller batches
+        elif table_name in ['transactions', 'withdrawals']:
+            batch_size = 8000  # Medium complexity
+        else:
+            batch_size = 15000  # Simpler tables can handle larger batches
+            
         total_inserted = 0
         
-        logger.info(f"Optimized streaming insert {len(bulk_data)} records into {table_name} with batch size {batch_size}")
+        logger.info(f"Cloud-optimized streaming: {len(bulk_data)} records into {table_name} (batch size: {batch_size})")
         
         for start_idx in range(0, len(bulk_data), batch_size):
             batch = bulk_data[start_idx:start_idx + batch_size]
+            batch_num = start_idx // batch_size + 1
             
-            # Direct insert with no additional processing
-            self.service.client.insert(table_name, batch, column_names=expected_columns)
-            total_inserted += len(batch)
+            # Retry logic for each batch
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    self.service.client.insert(table_name, batch, column_names=expected_columns)
+                    total_inserted += len(batch)
+                    break  # Success
+                    
+                except Exception as e:
+                    logger.warning(f"Batch {batch_num} attempt {attempt + 1}/{max_retries} failed: {e}")
+                    
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(2 ** attempt)  # Exponential backoff
+                        
+                        # Test connection and reconnect if needed
+                        try:
+                            self.service.client.command("SELECT 1")
+                        except:
+                            logger.info("Reconnecting to ClickHouse...")
+                            self.service.client = self.service._connect()
+                    else:
+                        logger.error(f"Batch {batch_num} failed after {max_retries} attempts")
+                        raise
             
-            # Progress logging for very large datasets
-            if len(bulk_data) > 500000 and start_idx % (batch_size * 5) == 0:  # Every 5 batches for large datasets
+            # Progress for large datasets
+            if len(bulk_data) > 30000 and batch_num % 10 == 0:
                 progress = (start_idx + len(batch)) / len(bulk_data) * 100
                 logger.info(f"Progress: {progress:.1f}% ({total_inserted:,} records)")
         

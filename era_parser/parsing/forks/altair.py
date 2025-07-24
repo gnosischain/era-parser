@@ -39,12 +39,12 @@ class AltairParser(BaseForkParser):
         else:
             result["sync_aggregate"] = {}
         
-        # Altair has the base 5 variable fields
+        # Altair has the base 5 variable fields with actual deposit parsing
         field_definitions = [
             ("proposer_slashings", parse_list_of_items, lambda d: None),
             ("attester_slashings", parse_list_of_items, lambda d: None),
             ("attestations", parse_list_of_items, self.parse_attestation),
-            ("deposits", parse_list_of_items, lambda d: None),
+            ("deposits", parse_list_of_items, self.parse_deposit),  # ✅ FIXED: Now using parse_deposit
             ("voluntary_exits", parse_list_of_items, lambda d: None)
         ]
         

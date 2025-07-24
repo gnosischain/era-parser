@@ -1,4 +1,4 @@
-"""Optimized ClickHouse service with time-based partitioning and proper ORDER BY keys"""
+"""Optimized ClickHouse service with time-based partitioning and single timestamp"""
 
 import os
 import logging
@@ -11,7 +11,7 @@ import clickhouse_connect
 logger = logging.getLogger(__name__)
 
 class ClickHouseService:
-    """Optimized service for beacon chain data with time-based partitioning and bulk loading"""
+    """Optimized service for beacon chain data with time-based partitioning and single timestamp"""
 
     def __init__(self):
         """Initialize ClickHouse service from environment variables"""
@@ -29,7 +29,7 @@ class ClickHouseService:
         self._ensure_tables()
 
     def _connect(self):
-        """Connect to ClickHouse with optimized settings"""
+        """Connect to ClickHouse with optimized settings for ClickHouse Cloud"""
         try:
             client = clickhouse_connect.get_client(
                 host=self.host,
@@ -39,28 +39,35 @@ class ClickHouseService:
                 database=self.database,
                 secure=self.secure,
                 verify=False,
-                # Optimization: Increase connection settings for bulk operations
+                # OPTIMIZATION: Settings optimized for ClickHouse Cloud and large bulk operations
                 settings={
-                    'max_insert_block_size': 1000000,
+                    'max_insert_block_size': 100000,  # Reduced from 1M for stability
                     'insert_quorum': 0,
                     'insert_quorum_timeout': 0,
-                    'async_insert': 1,
-                    'wait_for_async_insert': 1,
-                    'async_insert_max_data_size': 10485760,  # 10MB
-                    'async_insert_busy_timeout_ms': 1000,
-                }
+                    'async_insert': 0,  # Disable async insert for more predictable behavior
+                    'max_execution_time': 300,  # 5 minutes
+                    'send_timeout': 300,  # 5 minutes  
+                    'receive_timeout': 300,  # 5 minutes
+                    'tcp_keep_alive_timeout': 60,
+                    'connect_timeout': 60,
+                    'max_memory_usage': 10000000000,  # 10GB
+                },
+                # Connection pool settings for stability
+                connect_timeout=60,
+                send_receive_timeout=300,  # 5 minutes for large operations
+                compress=True,  # Enable compression for better network efficiency
             )
             client.command("SELECT 1")
-            logger.info(f"Connected to ClickHouse at {self.host}:{self.port} with optimized settings")
+            logger.info(f"Connected to ClickHouse at {self.host}:{self.port} with cloud-optimized settings")
             return client
         except Exception as e:
             logger.error(f"Failed to connect to ClickHouse: {e}")
             raise
 
     def _ensure_tables(self):
-        """Create properly normalized tables with time-based partitioning"""
+        """Create properly normalized tables with time-based partitioning and SINGLE timestamp"""
 
-        # Blocks table - ONLY beacon chain block data with time-based partitioning
+        # Blocks table - ONLY beacon chain block data with single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.blocks (
             slot UInt64,
@@ -81,7 +88,7 @@ class ClickHouseService:
         ORDER BY (slot, proposer_index)
         """)
 
-        # Sync aggregates table - separate normalized table with optimized ORDER BY
+        # Sync aggregates table - single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.sync_aggregates (
             slot UInt64,
@@ -95,7 +102,7 @@ class ClickHouseService:
         ORDER BY (slot)
         """)
 
-        # Execution payloads table - separate normalized table
+        # Execution payloads table - SINGLE timestamp (removed duplicate timestamp column)
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.execution_payloads (
             slot UInt64,
@@ -108,7 +115,6 @@ class ClickHouseService:
             block_number UInt64 DEFAULT 0,
             gas_limit UInt64 DEFAULT 0,
             gas_used UInt64 DEFAULT 0,
-            timestamp DateTime DEFAULT toDateTime(0),
             timestamp_utc DateTime DEFAULT toDateTime(0),
             base_fee_per_gas String DEFAULT '',
             block_hash String DEFAULT '',
@@ -123,7 +129,7 @@ class ClickHouseService:
         ORDER BY (slot, block_number)
         """)
 
-        # Transactions table with optimized ORDER BY for transaction queries
+        # Transactions table - single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.transactions (
             slot UInt64,
@@ -135,7 +141,6 @@ class ClickHouseService:
             gas_limit UInt64 DEFAULT 0,
             gas_used UInt64 DEFAULT 0,
             base_fee_per_gas String DEFAULT '',
-            timestamp String DEFAULT '',
             timestamp_utc DateTime DEFAULT toDateTime(0),
             insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
         ) ENGINE = ReplacingMergeTree(insert_version)
@@ -143,7 +148,7 @@ class ClickHouseService:
         ORDER BY (slot, transaction_index, transaction_hash)
         """)
 
-        # Withdrawals table with validator-focused ORDER BY
+        # Withdrawals table - single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.withdrawals (
             slot UInt64,
@@ -153,7 +158,6 @@ class ClickHouseService:
             validator_index UInt64,
             address String,
             amount UInt64,
-            timestamp String DEFAULT '',
             timestamp_utc DateTime DEFAULT toDateTime(0),
             insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
         ) ENGINE = ReplacingMergeTree(insert_version)
@@ -161,7 +165,7 @@ class ClickHouseService:
         ORDER BY (slot, withdrawal_index, validator_index)
         """)
 
-        # Attestations table with committee-focused ORDER BY
+        # Attestations table - single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.attestations (
             slot UInt64,
@@ -182,16 +186,16 @@ class ClickHouseService:
         ORDER BY (slot, attestation_index, committee_index)
         """)
 
-        # Deposits table with deposit-focused ORDER BY
+        # Deposits table - single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.deposits (
             slot UInt64,
             deposit_index UInt64,
-            proof String DEFAULT '',
             pubkey String DEFAULT '',
             withdrawal_credentials String DEFAULT '',
             amount UInt64 DEFAULT 0,
             signature String DEFAULT '',
+            proof String DEFAULT '[]',  -- JSON array instead of 33 individual columns
             timestamp_utc DateTime DEFAULT toDateTime(0),
             insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
         ) ENGINE = ReplacingMergeTree(insert_version)
@@ -199,7 +203,7 @@ class ClickHouseService:
         ORDER BY (slot, deposit_index, pubkey)
         """)
 
-        # Voluntary exits table with validator-focused ORDER BY
+        # Voluntary exits table - single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.voluntary_exits (
             slot UInt64,
@@ -214,7 +218,7 @@ class ClickHouseService:
         ORDER BY (slot, validator_index, epoch)
         """)
 
-        # Proposer slashings table with slashing-focused ORDER BY
+        # Proposer slashings table - single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.proposer_slashings (
             slot UInt64,
@@ -238,7 +242,7 @@ class ClickHouseService:
         ORDER BY (slot, slashing_index, header_1_proposer_index)
         """)
 
-        # Attester slashings table with slashing-focused ORDER BY
+        # Attester slashings table - single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.attester_slashings (
             slot UInt64,
@@ -262,7 +266,7 @@ class ClickHouseService:
         ORDER BY (slot, slashing_index, att_1_committee_index)
         """)
 
-        # BLS changes table with validator-focused ORDER BY
+        # BLS changes table - single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.bls_changes (
             slot UInt64,
@@ -278,7 +282,7 @@ class ClickHouseService:
         ORDER BY (slot, change_index, validator_index)
         """)
 
-        # Blob commitments table with blob-focused ORDER BY
+        # Blob commitments table - single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.blob_commitments (
             slot UInt64,
@@ -291,7 +295,7 @@ class ClickHouseService:
         ORDER BY (slot, commitment_index)
         """)
 
-        # Execution requests table with request-type focused ORDER BY
+        # Execution requests table - single timestamp
         self.client.command(f"""
         CREATE TABLE IF NOT EXISTS {self.database}.execution_requests (
             slot UInt64,
@@ -314,7 +318,7 @@ class ClickHouseService:
         """)
 
     def load_dataframe_to_table(self, df: pd.DataFrame, table_name: str) -> int:
-        """Optimized bulk loading with direct data preparation"""
+        """Optimized bulk loading with ClickHouse Cloud reliability"""
         try:
             if df.empty:
                 logger.warning(f"No data in DataFrame for {table_name}")
@@ -331,17 +335,41 @@ class ClickHouseService:
                 logger.warning(f"No valid data prepared for {table_name}")
                 return 0
 
-            # OPTIMIZATION 2: Use single bulk insert instead of batching
+            # OPTIMIZATION 2: Use adaptive batch sizes based on data volume and table type
             total_records = len(bulk_data)
             
-            # For very large datasets, use streaming insert
-            if total_records > 100000:
+            # Adaptive thresholds for ClickHouse Cloud
+            if table_name == 'attestations' and total_records > 10000:
+                # Attestations are complex and prone to timeouts
+                return self._streaming_bulk_insert(bulk_data, table_name, expected_columns)
+            elif total_records > 20000:
+                # Large datasets use streaming with smaller batches
                 return self._streaming_bulk_insert(bulk_data, table_name, expected_columns)
             else:
-                # Direct bulk insert for smaller datasets
-                self.client.insert(table_name, bulk_data, column_names=expected_columns)
-                logger.info(f"Bulk inserted {total_records} records into {table_name}")
-                return total_records
+                # Small to medium datasets: direct bulk insert with retry
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        self.client.insert(table_name, bulk_data, column_names=expected_columns)
+                        logger.info(f"Bulk inserted {total_records} records into {table_name}")
+                        return total_records
+                    except Exception as e:
+                        logger.warning(f"Bulk insert attempt {attempt + 1}/{max_retries} failed for {table_name}: {e}")
+                        
+                        if attempt < max_retries - 1:
+                            import time
+                            time.sleep(2 ** attempt)  # Exponential backoff
+                            
+                            # Try to reconnect
+                            try:
+                                self.client.command("SELECT 1")
+                            except:
+                                logger.info("Reconnecting to ClickHouse...")
+                                self.client = self._connect()
+                        else:
+                            # If all retries fail, fall back to streaming
+                            logger.warning(f"All bulk insert attempts failed, falling back to streaming for {table_name}")
+                            return self._streaming_bulk_insert(bulk_data, table_name, expected_columns)
             
         except Exception as e:
             logger.error(f"Failed to load DataFrame into {table_name}: {e}")
@@ -350,7 +378,7 @@ class ClickHouseService:
             raise
 
     def _prepare_bulk_data(self, df: pd.DataFrame, expected_columns: List[str]) -> List[List]:
-        """Efficiently prepare data for bulk insert with robust timestamp handling"""
+        """Efficiently prepare data for bulk insert with single timestamp handling"""
         bulk_data = []
         
         # OPTIMIZATION: Pre-identify numeric vs string columns to avoid repeated type checking
@@ -368,7 +396,8 @@ class ClickHouseService:
             'transactions_count', 'withdrawals_count'
         }
         
-        datetime_columns = {'timestamp_utc', 'timestamp'}
+        # SIMPLIFIED: Only timestamp_utc is a datetime column
+        datetime_columns = {'timestamp_utc'}
         
         # Pre-convert DataFrame to dict for faster row access
         df_dict = df.to_dict('records')
@@ -415,11 +444,21 @@ class ClickHouseService:
         # Handle string values
         if isinstance(value, str):
             # Handle empty or default datetime strings
-            if value in ['1970-01-01T00:00:00+00:00', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00']:
+            if value in ['1970-01-01T00:00:00+00:00', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00', '0']:
                 return datetime(1970, 1, 1)
             
             try:
-                # Parse ISO datetime string
+                # First try to parse as Unix timestamp string
+                try:
+                    timestamp = int(value)
+                    if timestamp > 0 and timestamp < 4294944000:  # Valid Unix timestamp range for ClickHouse
+                        return datetime.fromtimestamp(timestamp)
+                    elif timestamp == 0:
+                        return datetime(1970, 1, 1)
+                except (ValueError, TypeError):
+                    pass
+                
+                # Then try ISO datetime string parsing
                 if 'T' in value:
                     # Clean up timezone info for fromisoformat
                     dt_str = value.replace('Z', '')
@@ -434,10 +473,10 @@ class ClickHouseService:
                     
                     return datetime.fromisoformat(dt_str)
                 else:
-                    # Try to parse as Unix timestamp string
+                    # Try to parse as float timestamp string
                     try:
                         timestamp = float(value)
-                        if timestamp > 0 and timestamp < 2147483647:  # Valid Unix timestamp range
+                        if timestamp > 0 and timestamp < 4294944000:  # Valid Unix timestamp range
                             return datetime.fromtimestamp(timestamp)
                         else:
                             return datetime(1970, 1, 1)
@@ -450,7 +489,7 @@ class ClickHouseService:
         # Handle numeric values (Unix timestamps)
         elif isinstance(value, (int, float)):
             try:
-                if value > 0 and value < 2147483647:  # Valid Unix timestamp range
+                if value > 0 and value < 4294944000:  # Valid Unix timestamp range
                     return datetime.fromtimestamp(value)
                 else:
                     return datetime(1970, 1, 1)
@@ -468,22 +507,52 @@ class ClickHouseService:
             return datetime(1970, 1, 1)
 
     def _streaming_bulk_insert(self, bulk_data: List[List], table_name: str, expected_columns: List[str]) -> int:
-        """Handle very large datasets with streaming inserts"""
-        # OPTIMIZATION 3: Use much larger batch sizes for better throughput
-        batch_size = 50000  # Increased from 100 to 50,000
+        """Handle large datasets with smaller, more reliable batch sizes for ClickHouse Cloud"""
+        # OPTIMIZATION: Use smaller batch sizes for ClickHouse Cloud reliability
+        if table_name == 'attestations':
+            batch_size = 5000  # Smaller batches for attestations which are often large
+        elif table_name in ['transactions', 'withdrawals']:
+            batch_size = 10000  # Medium batches for transaction data
+        else:
+            batch_size = 20000  # Larger batches for smaller datasets
+            
         total_inserted = 0
         
-        logger.info(f"Streaming insert {len(bulk_data)} records into {table_name} with batch size {batch_size}")
+        logger.info(f"Cloud-optimized streaming insert {len(bulk_data)} records into {table_name} with batch size {batch_size}")
         
         for start_idx in range(0, len(bulk_data), batch_size):
             batch = bulk_data[start_idx:start_idx + batch_size]
             
-            # Direct insert without additional processing
-            self.client.insert(table_name, batch, column_names=expected_columns)
-            total_inserted += len(batch)
+            # Retry logic for cloud reliability
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Insert with timeout handling
+                    self.client.insert(table_name, batch, column_names=expected_columns)
+                    total_inserted += len(batch)
+                    break  # Success, exit retry loop
+                    
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt + 1}/{max_retries} failed for {table_name} batch {start_idx//batch_size + 1}: {e}")
+                    
+                    if attempt < max_retries - 1:
+                        # Wait before retry and try to reconnect
+                        import time
+                        time.sleep(2 ** attempt)  # Exponential backoff
+                        
+                        try:
+                            # Test connection and reconnect if needed
+                            self.client.command("SELECT 1")
+                        except:
+                            logger.info("Reconnecting to ClickHouse...")
+                            self.client = self._connect()
+                    else:
+                        # Final attempt failed
+                        logger.error(f"All {max_retries} attempts failed for {table_name} batch {start_idx//batch_size + 1}")
+                        raise
             
-            # Log progress for large datasets
-            if start_idx % (batch_size * 10) == 0:  # Every 10 batches
+            # Progress logging for large datasets
+            if len(bulk_data) > 50000 and (start_idx // batch_size) % 10 == 0:  # Every 10 batches for large datasets
                 progress = (start_idx + len(batch)) / len(bulk_data) * 100
                 logger.info(f"Progress: {progress:.1f}% ({total_inserted:,} records)")
         
@@ -491,7 +560,7 @@ class ClickHouseService:
         return total_inserted
 
     def _get_table_columns(self, table_name: str) -> List[str]:
-        """Get expected columns for normalized tables with time-based partitioning"""
+        """Get expected columns for normalized tables with SINGLE timestamp"""
         column_mapping = {
             'blocks': [
                 'slot', 'proposer_index', 'parent_root', 'state_root', 'signature', 
@@ -505,16 +574,16 @@ class ClickHouseService:
             'execution_payloads': [
                 'slot', 'parent_hash', 'fee_recipient', 'state_root', 'receipts_root',
                 'logs_bloom', 'prev_randao', 'block_number', 'gas_limit', 'gas_used',
-                'timestamp', 'base_fee_per_gas', 'block_hash', 'blob_gas_used', 
+                'timestamp_utc', 'base_fee_per_gas', 'block_hash', 'blob_gas_used', 
                 'excess_blob_gas', 'extra_data'
             ],
             'transactions': [
                 'slot', 'block_number', 'block_hash', 'transaction_index', 'transaction_hash', 
-                'fee_recipient', 'gas_limit', 'gas_used', 'base_fee_per_gas', 'timestamp', 'timestamp_utc'
+                'fee_recipient', 'gas_limit', 'gas_used', 'base_fee_per_gas', 'timestamp_utc'
             ],
             'withdrawals': [
                 'slot', 'block_number', 'block_hash', 'withdrawal_index', 'validator_index', 
-                'address', 'amount', 'timestamp', 'timestamp_utc'
+                'address', 'amount', 'timestamp_utc'
             ],
             'attestations': [
                 'slot', 'attestation_index', 'aggregation_bits', 'signature', 'attestation_slot',
@@ -522,8 +591,8 @@ class ClickHouseService:
                 'target_epoch', 'target_root', 'timestamp_utc'
             ],
             'deposits': [
-                'slot', 'deposit_index', 'proof', 'pubkey', 'withdrawal_credentials', 
-                'amount', 'signature', 'timestamp_utc'
+                'slot', 'deposit_index', 'pubkey', 'withdrawal_credentials', 
+                'amount', 'signature', 'proof', 'timestamp_utc'
             ],
             'voluntary_exits': [
                 'slot', 'exit_index', 'signature', 'epoch', 'validator_index', 'timestamp_utc'
@@ -552,80 +621,24 @@ class ClickHouseService:
                 'amount', 'signature', 'deposit_request_index', 'source_address', 'validator_pubkey',
                 'source_pubkey', 'target_pubkey', 'timestamp_utc'
             ],
-            'era_files_processed': [
-                'era_number', 'network', 'file_hash', 'status', 'error_message', 
-                'records_inserted', 'processed_at'
+            'era_processing_state': [
+                'era_filename', 'network', 'era_number', 'dataset', 'status', 
+                'worker_id', 'attempt_count', 'file_hash', 'error_message', 
+                'rows_inserted', 'processing_duration_ms'
             ]
         }
         return column_mapping.get(table_name, [])
 
-    def is_era_processed(self, network: str, era_number: int, file_hash: str) -> bool:
-        """Check if era file has been processed successfully"""
-        if era_number is None:
-            era_number = 0
-            
-        try:
-            result = self.client.query(
-                "SELECT status FROM era_files_processed WHERE network = %s AND era_number = %s AND file_hash = %s ORDER BY processed_at DESC LIMIT 1",
-                [network, int(era_number), file_hash]
-            )
-            
-            if result.result_rows:
-                return result.result_rows[0][0] == 'success'
-            return False
-        except Exception as e:
-            logger.error(f"Error checking era processed status: {e}")
-            return False
-
-    def mark_era_processing(self, network: str, era_number: int, file_hash: str):
-        """Mark era as being processed"""
-        if era_number is None:
-            era_number = 0
-            
-        try:
-            self.client.insert(
-                'era_files_processed',
-                [[int(era_number), network, file_hash, 'processing', '', 0]],
-                column_names=['era_number', 'network', 'file_hash', 'status', 'error_message', 'records_inserted']
-            )
-        except Exception as e:
-            logger.error(f"Error marking era as processing: {e}")
-
-    def mark_era_success(self, network: str, era_number: int, file_hash: str, records_count: int):
-        """Mark era as successfully processed"""
-        if era_number is None:
-            era_number = 0
-            
-        try:
-            self.client.insert(
-                'era_files_processed',
-                [[int(era_number), network, file_hash, 'success', '', records_count]],
-                column_names=['era_number', 'network', 'file_hash', 'status', 'error_message', 'records_inserted']
-            )
-        except Exception as e:
-            logger.error(f"Error marking era as success: {e}")
-
-    def mark_era_failed(self, network: str, era_number: int, file_hash: str, error_message: str):
-        """Mark era as failed"""
-        if era_number is None:
-            era_number = 0
-            
-        try:
-            # Truncate error message
-            error_msg = error_message[:500] if error_message else ''
-            
-            self.client.insert(
-                'era_files_processed',
-                [[int(era_number), network, file_hash, 'failed', error_msg, 0]],
-                column_names=['era_number', 'network', 'file_hash', 'status', 'error_message', 'records_inserted']
-            )
-        except Exception as e:
-            logger.error(f"Error marking era as failed: {e}")
-
     def get_processed_eras(self, network: str, start_era: int = None, end_era: int = None) -> List[int]:
-        """Get list of successfully processed era numbers"""
+        """Get list of successfully processed era numbers using era_processing_progress view"""
         try:
-            query = "SELECT era_number FROM era_files_processed WHERE network = %s AND status = 'success'"
+            query = f"""
+            SELECT era_number 
+            FROM {self.database}.era_processing_progress 
+            WHERE network = %s 
+              AND completed_datasets = total_datasets
+              AND completed_datasets > 0
+            """
             params = [network]
             
             if start_era is not None:
@@ -645,20 +658,23 @@ class ClickHouseService:
             return []
 
     def get_failed_eras(self, network: str) -> List[Dict]:
-        """Get list of failed era processing attempts"""
+        """Get list of failed era processing attempts using era_processing_state"""
         try:
-            result = self.client.query(
-                "SELECT era_number, file_hash, processed_at, error_message FROM era_files_processed WHERE network = %s AND status = 'failed' ORDER BY processed_at DESC",
-                [network]
-            )
+            result = self.client.query(f"""
+                SELECT era_number, era_filename, created_at, error_message, dataset
+                FROM {self.database}.era_processing_state 
+                WHERE network = %s AND status = 'failed' 
+                ORDER BY created_at DESC
+            """, [network])
             
             failed_eras = []
             for row in result.result_rows:
                 failed_eras.append({
                     'era_number': row[0],
-                    'file_hash': row[1],
-                    'processed_at': row[2],
-                    'error_message': row[3]
+                    'era_filename': row[1],
+                    'failed_at': row[2],
+                    'error_message': row[3],
+                    'dataset': row[4]
                 })
             return failed_eras
         except Exception as e:

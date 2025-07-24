@@ -109,7 +109,7 @@ class CapellaParser(BellatrixParser):
             ("proposer_slashings", parse_list_of_items, lambda d: None),
             ("attester_slashings", parse_list_of_items, lambda d: None),
             ("attestations", parse_list_of_items, self.parse_attestation),
-            ("deposits", parse_list_of_items, lambda d: None),
+            ("deposits", parse_list_of_items, self.parse_deposit),  # ✅ FIXED: Now using parse_deposit
             ("voluntary_exits", parse_list_of_items, lambda d: None)
         ]
         all_field_definitions = base_field_definitions + post_merge_fields
