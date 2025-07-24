@@ -1,4 +1,4 @@
-"""SSZ parsing utilities - FIXED VERSION"""
+"""SSZ parsing utilities - Clean production version"""
 
 import struct
 from typing import List, Callable, Any, Optional
@@ -36,10 +36,12 @@ def parse_list_of_items(data: bytes, item_parser_func: Callable, *args) -> List[
         'parse_withdrawal': 44,
         'parse_deposit_request': 192, 
         'parse_withdrawal_request': 76,
-        'parse_consolidation_request': 116
+        'parse_consolidation_request': 116,
+        'parse_kzg_commitment': 48
     }
     
-    parser_name = item_parser_func.__name__
+    parser_name = item_parser_func.__name__ if hasattr(item_parser_func, '__name__') else 'unknown'
+    
     if parser_name in fixed_size_parsers:
         item_size = fixed_size_parsers[parser_name]
         for i in range(len(data) // item_size):

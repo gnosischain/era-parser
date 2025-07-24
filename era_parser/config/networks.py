@@ -11,7 +11,7 @@ NETWORK_CONFIGS = {
             'bellatrix': 144896,
             'capella': 194048,
             'deneb': 269568,
-            'electra': 999999999  # Future fork
+            'electra': 364032
         }
     },
     'gnosis': {
@@ -37,7 +37,7 @@ NETWORK_CONFIGS = {
             'bellatrix': 100,
             'capella': 56832,
             'deneb': 132608,
-            'electra': 999999999  # Future fork
+            'electra': 222464  
         }
     }
 }

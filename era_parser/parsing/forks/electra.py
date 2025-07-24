@@ -1,11 +1,11 @@
-"""Electra fork parser"""
+"""Electra fork parser - Only adds execution requests to Deneb"""
 
 from typing import Dict, Any, Optional
 from ..ssz_utils import parse_list_of_items, read_uint32_at, read_uint64_at
 from .deneb import DenebParser
 
 class ElectraParser(DenebParser):
-    """Parser for Electra fork blocks"""
+    """Parser for Electra fork blocks - adds execution requests"""
     
     def parse_deposit_request(self, data: bytes) -> Optional[Dict[str, Any]]:
         """Parse DepositRequest - 192 bytes fixed size"""
@@ -89,7 +89,7 @@ class ElectraParser(DenebParser):
         # Parse base variable fields (5 fields)
         base_offsets, pos = self.parse_base_variable_fields(body_data, pos)
         
-        # Handle sync_aggregate (FIXED SIZE, embedded inline)
+        # Inherited from Altair: sync_aggregate (FIXED SIZE, embedded inline)
         if pos + 160 <= len(body_data):
             sync_aggregate_data = body_data[pos:pos+160]
             result["sync_aggregate"] = self.parse_sync_aggregate(sync_aggregate_data)
@@ -97,44 +97,31 @@ class ElectraParser(DenebParser):
         else:
             result["sync_aggregate"] = {}
         
-        # Handle post-merge fields (VARIABLE SIZE, use offsets)
-        post_merge_offsets = []
-        post_merge_fields = []
-        
-        # execution_payload
+        # Inherited from Bellatrix: execution_payload
         execution_payload_offset = read_uint32_at(body_data, pos)
-        post_merge_offsets.append(execution_payload_offset)
-        post_merge_fields.append(("execution_payload", self.parse_execution_payload, "deneb"))
         pos += 4
         
-        # bls_to_execution_changes
+        # Inherited from Capella: bls_to_execution_changes
         bls_changes_offset = read_uint32_at(body_data, pos)
-        post_merge_offsets.append(bls_changes_offset)
-        post_merge_fields.append(("bls_to_execution_changes", parse_list_of_items, lambda d: None))
         pos += 4
         
-        # blob_kzg_commitments
+        # Inherited from Deneb: blob_kzg_commitments
         blob_commitments_offset = read_uint32_at(body_data, pos)
-        post_merge_offsets.append(blob_commitments_offset)
-        post_merge_fields.append(("blob_kzg_commitments", parse_list_of_items, lambda d: None))
         pos += 4
         
-        # execution_requests (Electra addition)
+        # NEW in Electra: execution_requests
         execution_requests_offset = read_uint32_at(body_data, pos)
-        post_merge_offsets.append(execution_requests_offset)
-        post_merge_fields.append(("execution_requests", self.parse_execution_requests))
         pos += 4
         
         # Combine all offsets and fields
-        all_offsets = base_offsets + post_merge_offsets
-        base_field_definitions = [
-            ("proposer_slashings", parse_list_of_items, lambda d: None),
-            ("attester_slashings", parse_list_of_items, lambda d: None),
-            ("attestations", parse_list_of_items, self.parse_attestation),
-            ("deposits", parse_list_of_items, self.parse_deposit),  # ✅ FIXED: Now using parse_deposit
-            ("voluntary_exits", parse_list_of_items, lambda d: None)
+        all_offsets = base_offsets + [execution_payload_offset, bls_changes_offset, 
+                                     blob_commitments_offset, execution_requests_offset]
+        all_field_definitions = self.get_base_field_definitions() + [
+            ("execution_payload", self.parse_execution_payload, "deneb"),
+            ("bls_to_execution_changes", parse_list_of_items, lambda d: None),
+            ("blob_kzg_commitments", parse_list_of_items, self.parse_kzg_commitment),
+            ("execution_requests", self.parse_execution_requests)
         ]
-        all_field_definitions = base_field_definitions + post_merge_fields
         
         # Parse variable fields
         parsed_fields = self.parse_variable_field_data(body_data, all_offsets, all_field_definitions)

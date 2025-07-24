@@ -57,13 +57,26 @@ class LocalCommand(BaseCommand):
     
     def _handle_single_block(self, processor: EraProcessor, args: List[str]) -> None:
         """Handle single block parsing"""
-        if not self.validate_required_args(args, 1, "era-parser <era_file> block <slot>"):
+        if not self.validate_required_args(args, 1, "era-parser <era_file> block <slot> [output_file]"):
             return
         
         try:
             slot = int(args[0])
             result = processor.parse_single_block(slot)
-            print(json.dumps(result, indent=2))
+            
+            # Check if output file is specified
+            if len(args) > 1:
+                output_file = args[1]
+                self.setup_output_directory()
+                
+                with open(f"output/{output_file}", 'w') as f:
+                    json.dump(result, f, indent=2)
+                
+                print(f"✅ Block {slot} saved to output/{output_file}")
+            else:
+                # Print to stdout if no output file specified
+                print(json.dumps(result, indent=2))
+                
         except ValueError:
             print("❌ Slot must be a valid integer")
     

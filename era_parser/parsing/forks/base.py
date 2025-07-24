@@ -1,18 +1,13 @@
-"""Base fork parser with common functionality"""
+"""Refactored base fork parser with common functionality to eliminate duplication"""
 
 import json
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from ..ssz_utils import read_uint32_at, read_uint64_at, parse_list_of_items
 
 class BaseForkParser(ABC):
-    """Base class for all fork parsers"""
-    
-    @abstractmethod
-    def parse_body(self, body_data: bytes) -> Dict[str, Any]:
-        """Parse beacon block body for this fork"""
-        pass
+    """Base class for all fork parsers with common parsing logic"""
     
     def parse_fixed_fields(self, body_data: bytes) -> tuple:
         """Parse fixed fields common to all forks (first 200 bytes)"""
@@ -46,19 +41,10 @@ class BaseForkParser(ABC):
             base_offsets.append(offset)
         
         return base_offsets, start_pos + 20  # 5 offsets * 4 bytes
- 
+    
+    # Common parsing methods used across forks
     def parse_deposit(self, data: bytes) -> Optional[Dict[str, Any]]:
-        """
-        Parse a single deposit
-        
-        Structure:
-        - proof: 33 × 32 bytes = 1056 bytes (Vector[Bytes32, 33])
-        - deposit_data: 184 bytes
-        - pubkey: 48 bytes
-        - withdrawal_credentials: 32 bytes  
-        - amount: 8 bytes
-        - signature: 96 bytes
-        """
+        """Parse a single deposit"""
         try:
             if len(data) < 1240:
                 return None
@@ -138,6 +124,85 @@ class BaseForkParser(ABC):
         except Exception:
             return None
     
+    def parse_sync_aggregate(self, data: bytes) -> Dict[str, Any]:
+        """Parse sync_aggregate - fixed 160-byte structure (Altair+)"""
+        if len(data) < 160: 
+            return {}
+        return {
+            "sync_committee_bits": "0x" + data[0:64].hex(), 
+            "sync_committee_signature": "0x" + data[64:160].hex()
+        }
+    
+    def parse_withdrawal(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """Parse execution payload withdrawal - 44 bytes fixed size (Capella+)"""
+        if len(data) < 44:
+            return None
+        return {
+            "index": str(read_uint64_at(data, 0)), 
+            "validator_index": str(read_uint64_at(data, 8)),
+            "address": "0x" + data[16:36].hex(), 
+            "amount": str(read_uint64_at(data, 36))
+        }
+    
+    def parse_kzg_commitment(self, data: bytes) -> Optional[str]:
+        """Parse KZG commitment - 48 bytes fixed size (Deneb+)"""
+        if len(data) != 48:
+            return None
+        return "0x" + data.hex()
+    
+    # Execution payload parsing with version differences
+    def parse_execution_payload_base(self, data: bytes) -> Tuple[Dict[str, Any], int, Dict[str, int]]:
+        """Parse the common part of execution payload (Bellatrix base)"""
+        if len(data) < 100:
+            return {}, 0, {}
+            
+        result, pos = {}, 0
+        result["parent_hash"] = "0x" + data[pos:pos+32].hex(); pos += 32
+        result["fee_recipient"] = "0x" + data[pos:pos+20].hex(); pos += 20
+        result["state_root"] = "0x" + data[pos:pos+32].hex(); pos += 32
+        result["receipts_root"] = "0x" + data[pos:pos+32].hex(); pos += 32
+        result["logs_bloom"] = "0x" + data[pos:pos+256].hex(); pos += 256
+        result["prev_randao"] = "0x" + data[pos:pos+32].hex(); pos += 32
+        result["block_number"] = str(read_uint64_at(data, pos)); pos += 8
+        result["gas_limit"] = str(read_uint64_at(data, pos)); pos += 8
+        result["gas_used"] = str(read_uint64_at(data, pos)); pos += 8
+        result["timestamp"] = str(read_uint64_at(data, pos)); pos += 8
+        
+        # Variable fields offsets
+        offsets = {}
+        offsets["extra_data"] = read_uint32_at(data, pos); pos += 4
+        result["base_fee_per_gas"] = str(int.from_bytes(data[pos:pos+32], 'little')); pos += 32
+        result["block_hash"] = "0x" + data[pos:pos+32].hex(); pos += 32
+        offsets["transactions"] = read_uint32_at(data, pos); pos += 4
+        
+        return result, pos, offsets
+    
+    def parse_execution_payload_variable_fields(self, data: bytes, offsets: Dict[str, int], 
+                                              variable_fields: List[str]) -> Dict[str, Any]:
+        """Parse variable fields in execution payload"""
+        result = {}
+        
+        for field_name in variable_fields:
+            if field_name not in offsets:
+                continue
+                
+            start = offsets[field_name]
+            end = len(data)
+            sorted_offsets = sorted([v for v in offsets.values() if v > start])
+            if sorted_offsets: 
+                end = sorted_offsets[0]
+            
+            field_data = data[start:end]
+            
+            if field_name == "extra_data": 
+                result["extra_data"] = "0x" + field_data.hex()
+            elif field_name == "transactions": 
+                result["transactions"] = parse_list_of_items(field_data, lambda d: "0x" + d.hex())
+            elif field_name == "withdrawals": 
+                result["withdrawals"] = parse_list_of_items(field_data, self.parse_withdrawal)
+        
+        return result
+    
     def parse_variable_field_data(self, body_data: bytes, all_offsets: List[int], 
                                  field_definitions: List[tuple]) -> Dict[str, Any]:
         """Parse variable field data using offsets"""
@@ -189,3 +254,19 @@ class BaseForkParser(ABC):
                 else:
                     result[field_name] = []
         return result
+    
+    # Get base field definitions (used by all forks)
+    def get_base_field_definitions(self) -> List[tuple]:
+        """Get the 5 base variable field definitions common to all forks"""
+        return [
+            ("proposer_slashings", parse_list_of_items, lambda d: None),
+            ("attester_slashings", parse_list_of_items, lambda d: None),
+            ("attestations", parse_list_of_items, self.parse_attestation),
+            ("deposits", parse_list_of_items, self.parse_deposit),
+            ("voluntary_exits", parse_list_of_items, lambda d: None)
+        ]
+    
+    @abstractmethod
+    def parse_body(self, body_data: bytes) -> Dict[str, Any]:
+        """Parse beacon block body for this fork"""
+        pass

@@ -74,25 +74,64 @@ class RemoteEraDownloader:
         with open(self.progress_file, 'w') as f:
             json.dump(self.progress_data, f, indent=2)
     
+    def _discover_directory_listing(self, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
+        """
+        OPTIMIZATION: Parse HTML directory listing for non-S3 servers
+        """
+        print(f"📂 Using directory listing discovery")
+        
+        try:
+            # Get the directory listing page
+            response = requests.get(self.base_url, timeout=30)
+            if response.status_code != 200:
+                print(f"   ❌ Directory listing failed (status {response.status_code})")
+                return self._discover_parallel(start_era, end_era)
+            
+            # Parse HTML to find era files
+            html_content = response.text
+            available_eras = []
+            
+            # Look for era file links using regex
+            # Pattern matches: <a href="network-XXXXX-hash.era">
+            pattern = rf'<a href="({self.network}-(\d{{5}})-[a-f0-9]{{8}}\.era)">'
+            
+            import re
+            matches = re.findall(pattern, html_content, re.IGNORECASE)
+            
+            for filename, era_str in matches:
+                era_number = int(era_str)
+                
+                # Apply era range filters
+                if era_number < start_era:
+                    continue
+                if end_era is not None and era_number > end_era:
+                    continue
+                
+                url = f"{self.base_url}/{filename}"
+                available_eras.append((era_number, url))
+            
+            # Sort by era number
+            available_eras.sort(key=lambda x: x[0])
+            
+            print(f"   🎯 Found {len(available_eras)} era files in directory listing")
+            return available_eras
+            
+        except Exception as e:
+            print(f"   ⚠️  Directory listing failed: {e}, falling back to parallel discovery")
+            return self._discover_parallel(start_era, end_era)
+
     def discover_era_files(self, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
         """
-        OPTIMIZED: Fast discovery of available era files using bulk S3 listing or parallel requests
-        
-        Args:
-            start_era: Starting era number
-            end_era: Ending era number (None = discover until not found)
-            
-        Returns:
-            List of (era_number, url) tuples
+        OPTIMIZED: Fast discovery of available era files
         """
         print(f"🚀 Fast discovery starting from era {start_era}")
         
         if self.is_s3:
-            # OPTIMIZATION 1: Use S3 bulk listing for much faster discovery
+            # Use S3 bulk listing
             return self._discover_s3_bulk(start_era, end_era)
         else:
-            # OPTIMIZATION 2: Use parallel requests for non-S3 URLs
-            return self._discover_parallel(start_era, end_era)
+            # Try directory listing first, fall back to parallel if it fails
+            return self._discover_directory_listing(start_era, end_era)
     
     def _discover_s3_bulk(self, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
         """

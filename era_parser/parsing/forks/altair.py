@@ -1,20 +1,10 @@
-"""Altair fork parser"""
+"""Altair fork parser - Only adds sync_aggregate to Phase 0"""
 
 from typing import Dict, Any
-from ..ssz_utils import parse_list_of_items
-from .base import BaseForkParser
+from .phase0 import Phase0Parser
 
-class AltairParser(BaseForkParser):
-    """Parser for Altair fork blocks"""
-    
-    def parse_sync_aggregate(self, data: bytes) -> Dict[str, Any]:
-        """Parse sync_aggregate - fixed 160-byte structure"""
-        if len(data) < 160: 
-            return {}
-        return {
-            "sync_committee_bits": "0x" + data[0:64].hex(), 
-            "sync_committee_signature": "0x" + data[64:160].hex()
-        }
+class AltairParser(Phase0Parser):
+    """Parser for Altair fork blocks - adds sync_aggregate"""
     
     def parse_body(self, body_data: bytes) -> Dict[str, Any]:
         """Parse Altair beacon block body"""
@@ -31,7 +21,7 @@ class AltairParser(BaseForkParser):
         # Parse base variable fields (5 fields)
         base_offsets, pos = self.parse_base_variable_fields(body_data, pos)
         
-        # Handle sync_aggregate (FIXED SIZE, embedded inline)
+        # NEW in Altair: sync_aggregate (FIXED SIZE, embedded inline)
         if pos + 160 <= len(body_data):
             sync_aggregate_data = body_data[pos:pos+160]
             result["sync_aggregate"] = self.parse_sync_aggregate(sync_aggregate_data)
@@ -39,20 +29,14 @@ class AltairParser(BaseForkParser):
         else:
             result["sync_aggregate"] = {}
         
-        # Altair has the base 5 variable fields with actual deposit parsing
-        field_definitions = [
-            ("proposer_slashings", parse_list_of_items, lambda d: None),
-            ("attester_slashings", parse_list_of_items, lambda d: None),
-            ("attestations", parse_list_of_items, self.parse_attestation),
-            ("deposits", parse_list_of_items, self.parse_deposit),  # ✅ FIXED: Now using parse_deposit
-            ("voluntary_exits", parse_list_of_items, lambda d: None)
-        ]
+        # Same 5 base variable fields as Phase 0
+        field_definitions = self.get_base_field_definitions()
         
         # Parse variable fields
         parsed_fields = self.parse_variable_field_data(body_data, base_offsets, field_definitions)
         result.update(parsed_fields)
         
-        # Ensure all expected fields are present
+        # Ensure all expected fields are present (Phase 0 + sync_aggregate)
         expected_fields = [
             "proposer_slashings", "attester_slashings", "attestations", 
             "deposits", "voluntary_exits", "sync_aggregate"
