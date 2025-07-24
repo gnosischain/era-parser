@@ -1,372 +1,559 @@
-# Setup and Installation Guide
+# Setup Guide
+
+This comprehensive guide covers all installation methods, configuration options, and initial setup for Era Parser.
+
+## Table of Contents
+
+- [System Requirements](#system-requirements)
+- [Installation Methods](#installation-methods)
+- [Configuration](#configuration)
+- [Verification](#verification)
+- [Docker Setup](#docker-setup)
+- [Development Setup](#development-setup)
+- [Troubleshooting](#troubleshooting)
 
 ## System Requirements
 
-- Python 3.8 or higher
-- 4GB+ RAM (for processing large era files)
-- 10GB+ free disk space (for output files)
+### Minimum Requirements
+- **Python**: 3.8+ (recommended: 3.10+)
+- **Memory**: 4GB RAM (8GB+ recommended for large era files)
+- **Storage**: 10GB free space (more for batch processing)
+- **Network**: Stable internet connection for remote processing
 
-## Quick Setup (Recommended)
+### System Dependencies
 
-### 1. Install System Dependencies
-
-**macOS:**
+**macOS (Homebrew)**:
 ```bash
+# Install Snappy compression library
 brew install snappy
+
+# Optional: Install ClickHouse client for testing
+brew install clickhouse
 ```
 
-**Ubuntu/Debian:**
+**Ubuntu/Debian**:
 ```bash
+# Install required system packages
 sudo apt-get update
-sudo apt-get install libsnappy-dev
+sudo apt-get install -y python3-dev python3-pip python3-venv libsnappy-dev
+
+# Optional: Install ClickHouse client
+sudo apt-get install -y clickhouse-client
 ```
 
-**Windows:**
+**CentOS/RHEL/Fedora**:
 ```bash
-# Use conda for easier snappy installation
-conda install snappy
+# Install required packages
+sudo yum install -y python3-devel python3-pip snappy-devel
+# or for newer versions:
+sudo dnf install -y python3-devel python3-pip snappy-devel
+
+# Build tools if needed
+sudo yum groupinstall -y "Development Tools"
 ```
 
-### 2. Create Virtual Environment
+**Windows**:
+```powershell
+# Install Python from python.org
+# Install Visual Studio Build Tools
+# Install dependencies through pip (may require compilation)
+```
+
+## Installation Methods
+
+### Method 1: Standard Installation (Recommended)
+
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/your-org/era-parser.git
 cd era-parser
 
 # Create virtual environment
 python -m venv era_parser_env
 
 # Activate virtual environment
-source era_parser_env/bin/activate  # macOS/Linux
-# or
-era_parser_env\Scripts\activate     # Windows
-```
+source era_parser_env/bin/activate  # Linux/macOS
+# era_parser_env\Scripts\activate     # Windows
 
-### 3. Install Python Dependencies
-```bash
 # Install dependencies
+pip install --upgrade pip
 pip install -r requirements.txt
 
-# Install era-parser in development mode
+# Install Era Parser
 pip install -e .
-```
 
-### 4. Verify Installation
-```bash
-# Test all dependencies
-python -c "import snappy, pandas, pyarrow; print('✅ All dependencies installed successfully!')"
-
-# Test era-parser CLI
+# Verify installation
 era-parser --help
 ```
 
-## Alternative Installation Methods
-
-### Option 1: Using Conda (Easier for Windows)
+### Method 2: Direct pip Installation
 
 ```bash
-# Create conda environment
-conda create -n era_parser python=3.11
-conda activate era_parser
-
-# Install all dependencies via conda
-conda install -c conda-forge python-snappy pandas pyarrow numpy
-
-# Install era-parser
-pip install -e .
-```
-
-### Option 2: Using Poetry
-
-```bash
-# Install poetry if not already installed
-curl -sSL https://install.python-poetry.org | python3 -
-
-# Install dependencies
-poetry install
-
-# Activate virtual environment
-poetry shell
-```
-
-### Option 3: Docker (Isolated Environment)
-
-```dockerfile
-# Dockerfile
-FROM python:3.11-slim
-
-RUN apt-get update && apt-get install -y \
-    libsnappy-dev \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-COPY . .
-RUN pip install -e .
-
-CMD ["era-parser"]
-```
-
-```bash
-# Build and run
-docker build -t era-parser .
-docker run -v $(pwd)/data:/app/data era-parser era-parser data/era-file.era stats
-```
-
-## Quick Start Examples
-
-### 1. Basic Era File Analysis
-```bash
-# Show era file statistics (auto-detects network)
-era-parser gnosis-02607-fe3b60d1.era stats
-
-# Parse a single block
-era-parser gnosis-02607-fe3b60d1.era block 21348352
-```
-
-### 2. Export All Blocks
-```bash
-# Export to JSON (complete nested data)
-era-parser gnosis-02607-fe3b60d1.era all-blocks blocks.json
-
-# Export to CSV (flattened, single file)
-era-parser gnosis-02607-fe3b60d1.era all-blocks blocks.csv
-
-# Export to separate CSV files (recommended for analysis)
-era-parser gnosis-02607-fe3b60d1.era all-blocks data.csv --separate
-
-# Export to Parquet (best compression and performance)
-era-parser gnosis-02607-fe3b60d1.era all-blocks data.parquet --separate
-```
-
-### 3. Extract Specific Data Types
-```bash
-# Extract only transactions
-era-parser gnosis-02607-fe3b60d1.era transactions txs.csv
-
-# Extract only withdrawals (Capella+ forks)
-era-parser gnosis-02607-fe3b60d1.era withdrawals withdrawals.parquet
-
-# Extract only attestations  
-era-parser gnosis-02607-fe3b60d1.era attestations attestations.json
-```
-
-## Troubleshooting
-
-### Common Issues
-
-#### 1. Snappy Installation Problems
-
-**Error**: `ModuleNotFoundError: No module named 'snappy'`
-
-**Solution**:
-```bash
-# macOS: Install system snappy first
-brew install snappy
-pip install --no-cache-dir python-snappy
-
-# Ubuntu/Debian: Install dev headers
-sudo apt-get install libsnappy-dev
-pip install python-snappy
-
-# Alternative: Use conda
-conda install -c conda-forge python-snappy
-```
-
-#### 2. Memory Issues with Large Era Files
-
-**Error**: `MemoryError` or system becomes unresponsive
-
-**Solutions**:
-```bash
-# Use separate files mode to reduce memory usage
-era-parser large-era.era all-blocks data.parquet --separate
-
-# Export specific data types instead of all blocks
-era-parser large-era.era transactions txs.csv
-
-# Increase virtual memory (Linux)
-sudo sysctl vm.overcommit_memory=1
-```
-
-#### 3. Permission Errors
-
-**Error**: `PermissionError: [Errno 13] Permission denied`
-
-**Solutions**:
-```bash
-# Create output directory with proper permissions
-mkdir -p output
-chmod 755 output
-
-# Run with proper permissions
-sudo chown -R $USER:$USER era-parser/
-```
-
-#### 4. Path Issues
-
-**Error**: `era-parser: command not found`
-
-**Solutions**:
-```bash
-# Make sure virtual environment is activated
+# Create virtual environment
+python -m venv era_parser_env
 source era_parser_env/bin/activate
 
+# Install directly from repository
+pip install git+https://github.com/your-org/era-parser.git
+
 # Verify installation
-pip list | grep era-parser
-
-# Use full path if needed
-python -m era_parser.cli
+era-parser --help
 ```
 
-### Performance Optimization
-
-#### 1. For Large Era Files (>1GB)
-- Use `--separate` flag for CSV/Parquet exports
-- Export specific data types instead of all blocks
-- Ensure at least 8GB RAM available
-- Use SSD storage for better I/O performance
-
-#### 2. For Batch Processing
-```bash
-# Process multiple era files
-for era in era-files/*.era; do
-    echo "Processing $era..."
-    era-parser "$era" all-blocks "output/$(basename $era .era).parquet" --separate
-done
-```
-
-#### 3. For Memory-Constrained Systems
-```bash
-# Extract data incrementally
-era-parser era.era transactions txs.csv
-era-parser era.era withdrawals withdrawals.csv  
-era-parser era.era attestations attestations.csv
-```
-
-## Configuration
-
-### 1. Output Directory
-
-By default, files are saved to the `output/` directory. You can customize this:
+### Method 3: Development Installation
 
 ```bash
-# Set custom output directory
-export ERA_PARSER_OUTPUT_DIR="/path/to/custom/output"
-era-parser era.era all-blocks data.csv
-```
+# Clone with development dependencies
+git clone https://github.com/your-org/era-parser.git
+cd era-parser
 
-### 2. Network Detection
+# Create development environment
+python -m venv era_parser_dev
+source era_parser_dev/bin/activate
 
-Era files are automatically detected by filename, but you can verify:
-
-```python
-from era_parser.config import detect_network_from_filename
-from era_parser.ingestion import EraReader
-
-# Automatic detection from filename
-network = detect_network_from_filename("gnosis-02607-fe3b60d1.era")
-print(f"Detected network: {network}")  # Output: gnosis
-
-# Using EraReader (recommended)
-era_reader = EraReader("gnosis-02607-fe3b60d1.era")
-era_info = era_reader.get_era_info()
-print(f"Network: {era_info['network']}")
-print(f"Era: {era_info['era_number']}")
-print(f"Slots: {era_info['start_slot']} - {era_info['end_slot']}")
-```
-
-### 3. Custom Fork Epochs
-
-For testing or custom networks, you can modify fork epochs:
-
-```python
-from era_parser.config.networks import NETWORK_CONFIGS
-
-# Add custom network
-NETWORK_CONFIGS['custom'] = {
-    'GENESIS_TIME': 1234567890,
-    'SECONDS_PER_SLOT': 12,
-    'SLOTS_PER_EPOCH': 32,
-    'SLOTS_PER_HISTORICAL_ROOT': 8192,
-    'FORK_EPOCHS': {
-        'altair': 100,
-        'bellatrix': 200,
-        # ... etc
-    }
-}
-```
-
-## Development Setup
-
-If you plan to contribute or modify the parser:
-
-```bash
 # Install development dependencies
+pip install -r requirements.txt
 pip install -r requirements-dev.txt
+pip install -e .
 
 # Install pre-commit hooks
 pre-commit install
 
 # Run tests
-python -m pytest tests/ -v
-
-# Run with coverage
-python -m pytest tests/ --cov=era_parser --cov-report=html
+pytest
 ```
 
-## Getting Help
+## Configuration
 
-### 1. Check Logs
+### Environment Variables
+
+Create a `.env` file in your project directory:
+
 ```bash
-# Enable verbose logging
-export ERA_PARSER_LOG_LEVEL=DEBUG
-era-parser era.era stats
+# .env file template
+# Copy to .env and configure your values
+
+# ClickHouse Configuration (required for ClickHouse export)
+CLICKHOUSE_HOST=your-clickhouse-host.com
+CLICKHOUSE_PASSWORD=your-password
+CLICKHOUSE_PORT=8443
+CLICKHOUSE_USER=default
+CLICKHOUSE_DATABASE=beacon_chain
+CLICKHOUSE_SECURE=true
+
+# Remote Processing Configuration (required for --remote commands)
+ERA_BASE_URL=https://era-files-bucket.s3.eu-central-1.amazonaws.com
+ERA_DOWNLOAD_DIR=./temp_era_files
+ERA_CLEANUP_AFTER_PROCESS=true
+ERA_MAX_RETRIES=3
+ERA_MAX_CONCURRENT_DOWNLOADS=10
+
+# Optional: Performance Tuning
+ERA_DEBUG=false
+ERA_BATCH_SIZE=10000
 ```
 
-### 2. Validate Era File
+### Configuration Templates
+
+**ClickHouse Cloud**:
 ```bash
-# Check if era file is valid
-file era-file.era
-
-# Show first few bytes (should show e2store format)
-hexdump -C era-file.era | head  
-
-# Use the CLI to validate structure
-era-parser era-file.era stats
+# .env for ClickHouse Cloud
+CLICKHOUSE_HOST=your-instance.clickhouse.cloud
+CLICKHOUSE_PASSWORD=your-password
+CLICKHOUSE_PORT=8443
+CLICKHOUSE_USER=default
+CLICKHOUSE_DATABASE=default
+CLICKHOUSE_SECURE=true
 ```
 
-### 3. Test with Small Era File
-Start with a smaller era file to verify your setup works before processing large files.
+**Self-Hosted ClickHouse**:
+```bash
+# .env for self-hosted ClickHouse
+CLICKHOUSE_HOST=localhost
+CLICKHOUSE_PASSWORD=your-password
+CLICKHOUSE_PORT=9000
+CLICKHOUSE_USER=default
+CLICKHOUSE_DATABASE=beacon_chain
+CLICKHOUSE_SECURE=false
+```
 
-### 4. Community Support
-- Check existing GitHub issues
-- Create detailed bug reports with:
-  - Operating system and Python version
-  - Complete error messages
-  - Steps to reproduce
-  - Era file information (network, era number, file size)
+**S3 Storage**:
+```bash
+# .env for S3-hosted era files
+ERA_BASE_URL=https://your-bucket.s3.region.amazonaws.com
+ERA_DOWNLOAD_DIR=/tmp/era_downloads
+ERA_CLEANUP_AFTER_PROCESS=true
+ERA_MAX_RETRIES=5
+```
 
-## Next Steps
+### Directory Structure
 
-Once installation is complete:
-
-1. **Read the [ERA File Format Guide](ERA_FILE_FORMAT.md)** to understand the underlying data structure
-2. **Try the [Quick Start examples](#quick-start-examples)** with your era files
-3. **Explore the output formats** to find what works best for your analysis
-4. **Check the [Development Guide](DEVELOPMENT.md)** if you want to extend the parser
-
-## Deactivating Environment
-
-When you're done working:
+Set up recommended directory structure:
 
 ```bash
-# Deactivate virtual environment
-deactivate
+# Create project directories
+mkdir -p era-parser-workspace/{config,data,output,logs,temp_era_files}
+cd era-parser-workspace
 
-# Or if using conda
-conda deactivate
+# Create configuration
+cp /path/to/era-parser/.env.example .env
+# Edit .env with your settings
+
+# Directory structure:
+# era-parser-workspace/
+# ├── .env              # Environment configuration
+# ├── config/           # Additional configuration files
+# ├── data/             # Local era files
+# ├── output/           # Export output files
+# ├── logs/             # Processing logs
+# └── temp_era_files/   # Temporary downloads
+```
+
+## Verification
+
+### Basic Installation Test
+
+```bash
+# Test CLI availability
+era-parser --help
+
+# Test with sample era file (if available)
+era-parser sample.era stats
+
+# Test configuration
+python -c "
+import era_parser
+from era_parser.config import get_network_config
+print('Era Parser version:', era_parser.__version__)
+print('Mainnet config:', get_network_config('mainnet'))
+"
+```
+
+### ClickHouse Connection Test
+
+```bash
+# Test ClickHouse connection
+python -c "
+import os
+from era_parser.export.clickhouse_service import ClickHouseService
+
+# Load environment
+from dotenv import load_dotenv
+load_dotenv()
+
+try:
+    service = ClickHouseService()
+    print('✅ ClickHouse connection successful')
+    print('Database:', service.database)
+except Exception as e:
+    print('❌ ClickHouse connection failed:', e)
+"
+```
+
+### Remote Processing Test
+
+```bash
+# Test remote discovery (without processing)
+era-parser --remote gnosis 1082 --download-only
+
+# Test with small era range
+era-parser --remote gnosis 1082 all-blocks test_output.json
+```
+
+## Docker Setup
+
+### Quick Docker Start
+
+```bash
+# Clone repository
+git clone https://github.com/your-org/era-parser.git
+cd era-parser
+
+# Copy environment template
+cp .env.example .env
+# Edit .env with your configuration
+
+# Build Docker image
+docker build -t era-parser:latest .
+
+# Create directories
+mkdir -p output era-files
+
+# Test Docker installation
+docker run --rm -v $(pwd)/output:/app/output era-parser:latest --help
+```
+
+### Docker Compose Setup
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  era-parser:
+    build: .
+    image: era-parser:latest
+    env_file: .env
+    volumes:
+      - ./output:/app/output
+      - ./era-files:/app/era-files:ro
+      - ./temp_era_files:/app/temp_era_files
+    working_dir: /app
+
+  shell:
+    <<: *era-parser
+    entrypoint: ["/bin/bash"]
+    stdin_open: true
+    tty: true
+```
+
+**Usage**:
+```bash
+# Process local era file
+docker-compose run --rm era-parser /app/era-files/sample.era stats
+
+# Remote processing
+docker-compose run --rm era-parser --remote gnosis 1082 all-blocks --export clickhouse
+
+# Interactive shell
+docker-compose run --rm shell
+```
+
+### Production Docker Setup
+
+```yaml
+# docker-compose.prod.yml
+version: '3.8'
+
+services:
+  era-parser:
+    image: era-parser:latest
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./output:/app/output
+      - ./logs:/app/logs
+      - era_downloads:/tmp/era_downloads
+    healthcheck:
+      test: ["CMD", "era-parser", "--era-status", "all"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  era_downloads:
+```
+
+## Development Setup
+
+### Development Environment
+
+```bash
+# Clone repository
+git clone https://github.com/your-org/era-parser.git
+cd era-parser
+
+# Create development environment
+python -m venv era_parser_dev
+source era_parser_dev/bin/activate
+
+# Install development dependencies
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+pip install -e .
+
+# Install pre-commit hooks
+pre-commit install
+
+# Set up testing environment
+cp .env.example .env.test
+# Configure test database and settings
+```
+
+### Development Tools
+
+```bash
+# Code formatting
+black era_parser/
+isort era_parser/
+
+# Linting
+flake8 era_parser/
+pylint era_parser/
+
+# Type checking
+mypy era_parser/
+
+# Testing
+pytest                          # Run all tests
+pytest tests/test_parsing.py    # Run specific test file
+pytest -v --cov=era_parser      # Run with coverage
+
+# Performance profiling
+python -m cProfile -o profile.stats era_parser/cli.py sample.era stats
+```
+
+### IDE Configuration
+
+**VS Code** (`.vscode/settings.json`):
+```json
+{
+    "python.defaultInterpreterPath": "./era_parser_env/bin/python",
+    "python.formatting.provider": "black",
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": true,
+    "python.testing.pytestEnabled": true,
+    "python.testing.pytestArgs": ["tests/"]
+}
+```
+
+**PyCharm**:
+1. Set Python interpreter to `era_parser_env/bin/python`
+2. Configure code style to use Black
+3. Enable pytest as test runner
+4. Set working directory to project root
+
+## Troubleshooting
+
+### Installation Issues
+
+**Python Version Issues**:
+```bash
+# Check Python version
+python --version
+
+# Use specific Python version
+python3.10 -m venv era_parser_env
+```
+
+**Dependency Conflicts**:
+```bash
+# Clean installation
+pip uninstall era-parser
+pip cache purge
+pip install --no-cache-dir -r requirements.txt
+pip install -e .
+```
+
+**Snappy Library Issues**:
+```bash
+# macOS
+brew reinstall snappy
+pip uninstall python-snappy
+pip install --no-cache-dir python-snappy
+
+# Ubuntu
+sudo apt-get install --reinstall libsnappy-dev
+pip install --no-cache-dir python-snappy
+```
+
+### Configuration Issues
+
+**Environment Variables Not Loading**:
+```bash
+# Check if .env file exists and is readable
+ls -la .env
+cat .env
+
+# Test environment loading
+python -c "
+import os
+from dotenv import load_dotenv
+load_dotenv()
+print('CLICKHOUSE_HOST:', os.getenv('CLICKHOUSE_HOST'))
+"
+```
+
+**Permission Issues**:
+```bash
+# Fix directory permissions
+chmod 755 era-parser/
+chmod 644 .env
+chmod -R 755 output/
+```
+
+### Runtime Issues
+
+**Memory Issues**:
+```bash
+# Monitor memory usage
+htop
+# or
+ps aux | grep era-parser
+
+# Reduce batch size
+export ERA_BATCH_SIZE=5000
+```
+
+**Network Issues**:
+```bash
+# Test connectivity
+curl -I $ERA_BASE_URL
+ping your-clickhouse-host.com
+
+# Increase timeouts
+export ERA_MAX_RETRIES=5
+```
+
+**ClickHouse Connection Issues**:
+```bash
+# Test connection manually
+clickhouse-client --host your-host --secure --password
+
+# Check firewall settings
+telnet your-clickhouse-host.com 8443
+```
+
+### Getting Help
+
+**Debug Mode**:
+```bash
+# Enable debug logging
+export ERA_DEBUG=true
+era-parser your-command
+
+# Increase verbosity
+era-parser -v your-command
+```
+
+**Log Analysis**:
+```bash
+# Check system logs
+tail -f /var/log/messages
+journalctl -f
+
+# Application logs
+tail -f logs/era-parser.log
+```
+
+**Community Support**:
+- GitHub Issues: Report bugs and feature requests
+- Documentation: Check docs/ directory for detailed guides
+- Examples: See examples/ directory for usage patterns
+
+### Performance Optimization
+
+**System Tuning**:
+```bash
+# Increase file descriptor limits
+ulimit -n 65536
+
+# Optimize Python
+export PYTHONOPTIMIZE=1
+
+# Use faster JSON library if available
+pip install orjson
+```
+
+**ClickHouse Tuning**:
+```sql
+-- Optimize ClickHouse settings
+SET max_memory_usage = 10000000000;
+SET max_threads = 8;
+SET max_insert_block_size = 1048576;
 ```
