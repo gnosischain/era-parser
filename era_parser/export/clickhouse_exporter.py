@@ -1,11 +1,10 @@
-"""ClickHouse exporter with granular era state management"""
+"""Optimized ClickHouse exporter with direct data preparation and bulk loading"""
 
 import json
 import logging
 import tempfile
 import time
 from typing import List, Dict, Any
-from pathlib import Path
 
 import pandas as pd
 from .base import BaseExporter
@@ -15,7 +14,7 @@ from .era_state_manager import EraStateManager
 logger = logging.getLogger(__name__)
 
 class ClickHouseExporter(BaseExporter):
-    """ClickHouse exporter with granular dataset state tracking"""
+    """Optimized ClickHouse exporter with direct data preparation and bulk loading"""
 
     def __init__(self, era_info: Dict[str, Any], era_file_path: str = None):
         """
@@ -71,8 +70,7 @@ class ClickHouseExporter(BaseExporter):
 
     def load_all_data_types(self, all_data: Dict[str, List[Dict[str, Any]]]):
         """
-        Load all data types into their respective ClickHouse tables with granular state tracking.
-        Only processes datasets that haven't been completed yet.
+        Optimized loading of all data types with minimal DataFrame overhead
         """
         if not all_data:
             logger.warning("No data to load")
@@ -88,14 +86,12 @@ class ClickHouseExporter(BaseExporter):
         
         logger.info(f"Processing era {self.era_filename} - {len(pending_datasets)} datasets need work: {pending_datasets}")
         
+        # OPTIMIZATION 1: Prepare all data at once instead of per-dataset
+        prepared_data = self._prepare_all_datasets_bulk(all_data, pending_datasets)
+        
         # Process each pending dataset independently
         for dataset in pending_datasets:
-            if dataset not in all_data:
-                logger.warning(f"Dataset {dataset} not found in provided data, skipping")
-                continue
-                
-            data_list = all_data[dataset]
-            if not data_list:
+            if dataset not in prepared_data:
                 logger.info(f"No data for {dataset}, marking as completed with 0 rows")
                 self.state_manager.complete_dataset(self.era_filename, dataset, 0)
                 continue
@@ -105,11 +101,11 @@ class ClickHouseExporter(BaseExporter):
                 logger.info(f"Dataset {dataset} already being processed by another worker, skipping")
                 continue
             
-            # Process the dataset
+            # Process the dataset with pre-prepared data
             start_time = time.time()
             try:
-                logger.info(f"Loading {len(data_list)} records into {dataset} table")
-                records_loaded = self.load_data_to_table(data_list, dataset)
+                bulk_data = prepared_data[dataset]
+                records_loaded = self._direct_bulk_insert(bulk_data, dataset)
                 
                 # Calculate processing time
                 processing_duration_ms = int((time.time() - start_time) * 1000)
@@ -139,58 +135,211 @@ class ClickHouseExporter(BaseExporter):
         else:
             logger.warning(f"Era {self.era_filename} still has {len(remaining_pending)} pending datasets: {remaining_pending}")
 
+    def _prepare_all_datasets_bulk(self, all_data: Dict[str, List[Dict[str, Any]]], 
+                                 pending_datasets: List[str]) -> Dict[str, List[List]]:
+        """
+        OPTIMIZATION: Prepare all dataset data in bulk to avoid repeated DataFrame operations
+        """
+        prepared_data = {}
+        
+        for dataset in pending_datasets:
+            if dataset not in all_data or not all_data[dataset]:
+                continue
+                
+            data_list = all_data[dataset]
+            logger.info(f"Preparing {len(data_list)} records for {dataset}")
+            
+            # Get expected columns for this table
+            expected_columns = self.service._get_table_columns(dataset)
+            
+            # OPTIMIZATION: Direct conversion to bulk format without DataFrame
+            bulk_data = self._prepare_dataset_direct(data_list, expected_columns)
+            prepared_data[dataset] = bulk_data
+            
+        return prepared_data
+
+    def _prepare_dataset_direct(self, data_list: List[Dict[str, Any]], 
+                              expected_columns: List[str]) -> List[List]:
+        """
+        OPTIMIZATION: Direct preparation of data without DataFrame intermediate step
+        """
+        # Pre-identify numeric columns for faster processing
+        numeric_columns = {
+            'slot', 'era_number', 'block_number', 'proposer_index', 'gas_used', 
+            'gas_limit', 'withdrawal_index', 'validator_index', 'amount', 
+            'attestation_index', 'committee_index', 'source_epoch', 'target_epoch',
+            'deposit_index', 'exit_index', 'epoch', 'transaction_index',
+            'attestation_slot', 'eth1_deposit_count', 'blob_gas_used', 'excess_blob_gas',
+            'slashing_index', 'header_1_slot', 'header_1_proposer_index',
+            'header_2_slot', 'header_2_proposer_index', 'att_1_slot', 'att_1_committee_index',
+            'att_1_source_epoch', 'att_1_target_epoch', 'att_2_slot', 'att_2_committee_index',
+            'att_2_source_epoch', 'att_2_target_epoch', 'change_index', 'commitment_index',
+            'request_index', 'deposit_request_index', 'records_inserted', 'participating_validators'
+        }
+        
+        datetime_columns = {'timestamp_utc'}
+        
+        bulk_data = []
+        for row in data_list:
+            row_data = []
+            for col in expected_columns:
+                value = row.get(col)
+                
+                if col in numeric_columns:
+                    # Fast numeric conversion
+                    if value is None or value == '' or (isinstance(value, str) and value.strip() == ''):
+                        row_data.append(0)
+                    else:
+                        try:
+                            # Direct conversion for common cases
+                            if isinstance(value, int):
+                                row_data.append(value)
+                            elif isinstance(value, float):
+                                row_data.append(int(value))
+                            else:
+                                row_data.append(int(float(str(value))))
+                        except (ValueError, TypeError):
+                            row_data.append(0)
+                elif col in datetime_columns:
+                    # Handle timestamp_utc conversion
+                    converted_dt = self._convert_to_datetime(value)
+                    row_data.append(converted_dt)
+                else:
+                    # Fast string conversion
+                    if value is None:
+                        row_data.append('')
+                    else:
+                        row_data.append(str(value))
+            
+            bulk_data.append(row_data)
+        
+        return bulk_data
+
+    def _convert_to_datetime(self, value):
+        """Robust datetime conversion for ClickHouse DateTime columns"""
+        from datetime import datetime
+        import pandas as pd
+        
+        # Handle None, NaN, empty string cases
+        if pd.isna(value) if hasattr(pd, 'isna') else value is None or value == '':
+            return datetime(1970, 1, 1)
+        
+        # Handle string values
+        if isinstance(value, str):
+            # Handle empty or default datetime strings
+            if value in ['1970-01-01T00:00:00+00:00', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00']:
+                return datetime(1970, 1, 1)
+            
+            try:
+                # Parse ISO datetime string
+                if 'T' in value:
+                    # Clean up timezone info for fromisoformat
+                    dt_str = value.replace('Z', '')
+                    if '+' in dt_str:
+                        dt_str = dt_str.split('+')[0]
+                    if dt_str.endswith('Z'):
+                        dt_str = dt_str[:-1]
+                    
+                    # Handle microseconds if present
+                    if '.' in dt_str:
+                        dt_str = dt_str.split('.')[0]  # Remove microseconds
+                    
+                    return datetime.fromisoformat(dt_str)
+                else:
+                    # Try to parse as Unix timestamp string
+                    try:
+                        timestamp = float(value)
+                        if timestamp > 0 and timestamp < 2147483647:  # Valid Unix timestamp range
+                            return datetime.fromtimestamp(timestamp)
+                        else:
+                            return datetime(1970, 1, 1)
+                    except (ValueError, TypeError):
+                        return datetime(1970, 1, 1)
+            except (ValueError, TypeError):
+                return datetime(1970, 1, 1)
+        
+        # Handle numeric values (Unix timestamps)
+        elif isinstance(value, (int, float)):
+            try:
+                if value > 0 and value < 2147483647:  # Valid Unix timestamp range
+                    return datetime.fromtimestamp(value)
+                else:
+                    return datetime(1970, 1, 1)
+            except (ValueError, TypeError, OSError):
+                return datetime(1970, 1, 1)
+        
+        # Handle datetime objects (should already be correct)
+        elif hasattr(value, 'timestamp'):  # datetime-like object
+            return value
+        
+        # Fallback for any other type
+        else:
+            return datetime(1970, 1, 1)
+
+    def _direct_bulk_insert(self, bulk_data: List[List], table_name: str) -> int:
+        """
+        OPTIMIZATION: Direct bulk insert bypassing DataFrame creation entirely
+        """
+        if not bulk_data:
+            logger.info(f"No data to load into {table_name}")
+            return 0
+
+        try:
+            expected_columns = self.service._get_table_columns(table_name)
+            
+            # OPTIMIZATION 2: Use optimized batch sizes based on data volume
+            total_records = len(bulk_data)
+            
+            if total_records <= 10000:
+                # Small datasets: single insert
+                self.service.client.insert(table_name, bulk_data, column_names=expected_columns)
+                logger.info(f"Direct bulk inserted {total_records} records into {table_name}")
+                return total_records
+            else:
+                # Large datasets: use optimized streaming
+                return self._optimized_streaming_insert(bulk_data, table_name, expected_columns)
+            
+        except Exception as e:
+            logger.error(f"Failed to bulk insert into {table_name}: {e}")
+            raise
+
+    def _optimized_streaming_insert(self, bulk_data: List[List], table_name: str, 
+                                  expected_columns: List[str]) -> int:
+        """
+        OPTIMIZATION: Use larger batch sizes and optimized streaming for maximum throughput
+        """
+        # OPTIMIZATION 3: Much larger batch sizes for better throughput
+        batch_size = 100000  # Increased from 100 to 100,000 for maximum throughput
+        total_inserted = 0
+        
+        logger.info(f"Optimized streaming insert {len(bulk_data)} records into {table_name} with batch size {batch_size}")
+        
+        for start_idx in range(0, len(bulk_data), batch_size):
+            batch = bulk_data[start_idx:start_idx + batch_size]
+            
+            # Direct insert with no additional processing
+            self.service.client.insert(table_name, batch, column_names=expected_columns)
+            total_inserted += len(batch)
+            
+            # Progress logging for very large datasets
+            if len(bulk_data) > 500000 and start_idx % (batch_size * 5) == 0:  # Every 5 batches for large datasets
+                progress = (start_idx + len(batch)) / len(bulk_data) * 100
+                logger.info(f"Progress: {progress:.1f}% ({total_inserted:,} records)")
+        
+        logger.info(f"Successfully streamed {total_inserted:,} records into {table_name}")
+        return total_inserted
+
     def load_data_to_table(self, data: List[Dict[str, Any]], table_name: str) -> int:
-        """Load data into specific ClickHouse table"""
+        """Optimized loading for single data type with minimal overhead"""
         if not data:
             logger.info(f"No data to load into {table_name}")
             return 0
 
         try:
-            # Create DataFrame and load directly
-            df = pd.DataFrame(data)
-            
-            if df.empty:
-                logger.warning(f"Empty DataFrame for {table_name}")
-                return 0
-
-            # Get expected columns for this table
+            # OPTIMIZATION: Skip DataFrame creation entirely for single table loads
             expected_columns = self.service._get_table_columns(table_name)
-            
-            # Create aligned DataFrame with proper columns
-            aligned_df = pd.DataFrame()
-            
-            for col in expected_columns:
-                if col in df.columns:
-                    aligned_df[col] = df[col]
-                else:
-                    # Provide default values for missing columns
-                    if col in ['block_hash', 'fee_recipient', 'signature', 'version', 'timestamp_utc', 
-                              'parent_root', 'state_root', 'beacon_block_root', 'transaction_hash', 
-                              'address', 'error_message', 'status', 'randao_reveal', 'graffiti',
-                              'eth1_deposit_root', 'eth1_block_hash', 'aggregation_bits',
-                              'source_root', 'target_root', 'pubkey', 'withdrawal_credentials',
-                              'sync_committee_bits', 'sync_committee_signature', 'proof',
-                              'from_bls_pubkey', 'to_execution_address', 'commitment',
-                              'source_address', 'validator_pubkey', 'source_pubkey', 'target_pubkey',
-                              'header_1_parent_root', 'header_1_state_root', 'header_1_body_root', 
-                              'header_1_signature', 'header_2_parent_root', 'header_2_state_root', 
-                              'header_2_body_root', 'header_2_signature', 'att_1_beacon_block_root',
-                              'att_1_signature', 'att_2_beacon_block_root', 'att_2_signature',
-                              'base_fee_per_gas', 'timestamp', 'request_type']:
-                        aligned_df[col] = ''
-                    else:
-                        aligned_df[col] = 0
-            
-            # Fill NaN values
-            for col in aligned_df.columns:
-                if aligned_df[col].dtype == 'object':  # String columns
-                    aligned_df[col] = aligned_df[col].fillna('')
-                else:  # Numeric columns
-                    aligned_df[col] = aligned_df[col].fillna(0)
-            
-            # Load data using service method
-            records_loaded = self.service.load_dataframe_to_table(aligned_df, table_name)
-            return records_loaded
+            bulk_data = self._prepare_dataset_direct(data, expected_columns)
+            return self._direct_bulk_insert(bulk_data, table_name)
             
         except Exception as e:
             logger.error(f"Failed to load data into {table_name}: {e}")
