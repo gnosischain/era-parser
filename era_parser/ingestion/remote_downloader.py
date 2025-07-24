@@ -645,7 +645,7 @@ class RemoteEraDownloader:
         failed_eras = []
         
         # Import here to avoid circular dependencies
-        from ..cli import EraParserCLI
+        from ..core import EraProcessor
         
         for i, (era_number, url) in enumerate(available_eras, 1):
             print(f"\n{'='*60}")
@@ -660,9 +660,9 @@ class RemoteEraDownloader:
                     failed_eras.append(era_number)
                     continue
                 
-                # Process using existing CLI logic
-                cli = EraParserCLI()
-                cli.setup(local_path)
+                # Process using EraProcessor
+                processor = EraProcessor()
+                processor.setup(local_path)
                 
                 # Generate output filename
                 if export_type == "file":
@@ -673,7 +673,7 @@ class RemoteEraDownloader:
                     print(f"   🗄️  Output: ClickHouse")
                 
                 # Process based on command
-                success = cli._process_single_era(command, output_file, separate_files, export_type)
+                success = processor.process_single_era(command, output_file, separate_files, export_type)
                 
                 if success:
                     processed_count += 1
