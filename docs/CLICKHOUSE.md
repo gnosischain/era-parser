@@ -193,23 +193,39 @@ CREATE TABLE beacon_chain.proposer_slashings (
 PARTITION BY toStartOfMonth(timestamp_utc)
 ORDER BY (slot, slashing_index, header_1_proposer_index);
 
--- Attester slashings
+-- Attester slashings with full validator indices support
 CREATE TABLE beacon_chain.attester_slashings (
     slot UInt64,
     slashing_index UInt64,
+    
+    -- Attestation 1 data
     att_1_slot UInt64 DEFAULT 0,
     att_1_committee_index UInt64 DEFAULT 0,
     att_1_beacon_block_root String DEFAULT '',
     att_1_source_epoch UInt64 DEFAULT 0,
+    att_1_source_root String DEFAULT '',
     att_1_target_epoch UInt64 DEFAULT 0,
+    att_1_target_root String DEFAULT '',
     att_1_signature String DEFAULT '',
+    att_1_attesting_indices String DEFAULT '[]',
+    att_1_validator_count UInt32 DEFAULT 0,
+    
+    -- Attestation 2 data  
     att_2_slot UInt64 DEFAULT 0,
     att_2_committee_index UInt64 DEFAULT 0,
     att_2_beacon_block_root String DEFAULT '',
     att_2_source_epoch UInt64 DEFAULT 0,
+    att_2_source_root String DEFAULT '',
     att_2_target_epoch UInt64 DEFAULT 0,
+    att_2_target_root String DEFAULT '',
     att_2_signature String DEFAULT '',
+    att_2_attesting_indices String DEFAULT '[]',
+    att_2_validator_count UInt32 DEFAULT 0,
+    
+    -- Metadata
     timestamp_utc DateTime DEFAULT toDateTime(0),
+    total_slashed_validators UInt32 DEFAULT 0,
+    
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
 PARTITION BY toStartOfMonth(timestamp_utc)
@@ -578,7 +594,7 @@ GROUP BY day
 ORDER BY day;
 ```
 
-### Slashing Analysis
+### Enhanced Slashing Analysis
 ```sql
 -- Proposer slashing events
 SELECT 
@@ -591,7 +607,7 @@ FROM proposer_slashings
 WHERE timestamp_utc >= now() - INTERVAL 1 YEAR
 ORDER BY timestamp_utc DESC;
 
--- Attester slashing events
+-- Attester slashing events with detailed validator analysis
 SELECT 
     slot,
     att_1_committee_index,
@@ -599,6 +615,9 @@ SELECT
     att_1_target_epoch,
     att_2_source_epoch,
     att_2_target_epoch,
+    att_1_validator_count,
+    att_2_validator_count,
+    total_slashed_validators,
     timestamp_utc,
     CASE 
         WHEN att_1_target_epoch = att_2_target_epoch THEN 'Double Vote'
@@ -608,6 +627,40 @@ SELECT
 FROM attester_slashings 
 WHERE timestamp_utc >= now() - INTERVAL 1 YEAR
 ORDER BY timestamp_utc DESC;
+
+-- Find attester slashings with most validators
+SELECT 
+    slot,
+    total_slashed_validators,
+    att_1_validator_count,
+    att_2_validator_count,
+    timestamp_utc
+FROM attester_slashings 
+ORDER BY total_slashed_validators DESC 
+LIMIT 20;
+
+-- Check if specific validator was slashed in attester slashing
+SELECT 
+    slot,
+    slashing_index,
+    att_1_validator_count,
+    att_2_validator_count,
+    total_slashed_validators,
+    timestamp_utc
+FROM attester_slashings 
+WHERE has(JSONExtract(att_1_attesting_indices, 'Array(UInt64)'), 464190)
+   OR has(JSONExtract(att_2_attesting_indices, 'Array(UInt64)'), 464190);
+
+-- Attester slashing trends over time
+SELECT 
+    toStartOfMonth(timestamp_utc) as month,
+    count() as slashing_events,
+    sum(total_slashed_validators) as total_validators_slashed,
+    avg(total_slashed_validators) as avg_validators_per_slashing
+FROM attester_slashings 
+WHERE timestamp_utc >= now() - INTERVAL 1 YEAR
+GROUP BY month
+ORDER BY month;
 ```
 
 ### BLS Changes Analysis (Capella+)
@@ -763,6 +816,7 @@ ALTER TABLE transactions ADD INDEX idx_fee_recipient (fee_recipient) TYPE bloom_
 ALTER TABLE withdrawals ADD INDEX idx_validator_time (validator_index, timestamp_utc) TYPE minmax;
 ALTER TABLE attestations ADD INDEX idx_committee_time (committee_index, timestamp_utc) TYPE minmax;
 ALTER TABLE deposits ADD INDEX idx_pubkey (pubkey) TYPE bloom_filter;
+ALTER TABLE attester_slashings ADD INDEX idx_validator_count (total_slashed_validators) TYPE minmax;
 ```
 
 ### Storage Optimization
@@ -824,6 +878,8 @@ FROM (
     SELECT 'attestations' as table, timestamp_utc FROM attestations WHERE timestamp_utc >= now() - INTERVAL 1 HOUR
     UNION ALL
     SELECT 'withdrawals' as table, timestamp_utc FROM withdrawals WHERE timestamp_utc >= now() - INTERVAL 1 HOUR
+    UNION ALL
+    SELECT 'attester_slashings' as table, timestamp_utc FROM attester_slashings WHERE timestamp_utc >= now() - INTERVAL 1 HOUR
 )
 GROUP BY table
 ORDER BY table;
@@ -871,7 +927,15 @@ SELECT
     'attestations_future_slots' as issue,
     count() as count
 FROM attestations 
-WHERE attestation_slot > slot;
+WHERE attestation_slot > slot
+
+UNION ALL
+
+SELECT 
+    'attester_slashings_with_zero_validators' as issue,
+    count() as count
+FROM attester_slashings 
+WHERE total_slashed_validators = 0;
 ```
 
 ### Performance Monitoring
@@ -927,6 +991,7 @@ LIMIT 20;
 ALTER TABLE blocks DROP PARTITION '202301';  -- January 2023
 ALTER TABLE transactions DROP PARTITION '202301';
 ALTER TABLE attestations DROP PARTITION '202301';
+ALTER TABLE attester_slashings DROP PARTITION '202301';
 
 -- Clean up failed processing attempts older than 7 days
 ALTER TABLE era_processing_state DELETE 
@@ -937,6 +1002,7 @@ WHERE status = 'failed'
 OPTIMIZE TABLE blocks FINAL;
 OPTIMIZE TABLE transactions FINAL;
 OPTIMIZE TABLE attestations FINAL;
+OPTIMIZE TABLE attester_slashings FINAL;
 
 -- Check for orphaned records
 SELECT 
@@ -953,7 +1019,16 @@ SELECT
     count() as count
 FROM withdrawals w
 LEFT JOIN execution_payloads ep ON w.slot = ep.slot
-WHERE ep.slot IS NULL;
+WHERE ep.slot IS NULL
+
+UNION ALL
+
+SELECT 
+    'attester_slashings_without_blocks' as issue,
+    count() as count
+FROM attester_slashings ats
+LEFT JOIN blocks b ON ats.slot = b.slot
+WHERE b.slot IS NULL;
 ```
 
 ## Troubleshooting
@@ -1107,6 +1182,26 @@ AS SELECT
 FROM beacon_chain.blocks b
 LEFT JOIN beacon_chain.execution_payloads ep ON b.slot = ep.slot
 GROUP BY day, validator_index;
+
+-- Daily slashing summary
+CREATE MATERIALIZED VIEW beacon_chain.slashing_daily_summary
+ENGINE = SummingMergeTree()
+ORDER BY (day, slashing_type)
+AS SELECT
+    toDate(timestamp_utc) as day,
+    'attester' as slashing_type,
+    count() as slashing_events,
+    sum(total_slashed_validators) as total_validators_slashed
+FROM beacon_chain.attester_slashings
+GROUP BY day
+UNION ALL
+SELECT
+    toDate(timestamp_utc) as day,
+    'proposer' as slashing_type,
+    count() as slashing_events,
+    count() as total_validators_slashed  -- Each proposer slashing affects 1 validator
+FROM beacon_chain.proposer_slashings
+GROUP BY day;
 ```
 
 ### Data Export
@@ -1136,6 +1231,18 @@ FROM validator_performance_daily
 WHERE day >= '2024-01-01'
 FORMAT Parquet
 INTO OUTFILE '/tmp/validator_performance_2024.parquet';
+
+-- Export attester slashing details with validator indices
+SELECT 
+    slot,
+    total_slashed_validators,
+    att_1_attesting_indices,
+    att_2_attesting_indices,
+    timestamp_utc
+FROM attester_slashings
+WHERE timestamp_utc >= '2024-01-01'
+FORMAT JSONEachRow
+INTO OUTFILE '/tmp/attester_slashings_2024.jsonl';
 ```
 
 ### Integration with Other Tools
@@ -1169,6 +1276,16 @@ WHERE $__timeFilter(timestamp_utc)
   AND gas_limit > 0
 GROUP BY time
 ORDER BY time;
+
+-- Slashing events over time
+SELECT 
+    $__timeGroup(timestamp_utc, $__interval) as time,
+    count() as attester_slashings,
+    sum(total_slashed_validators) as total_validators_slashed
+FROM attester_slashings 
+WHERE $__timeFilter(timestamp_utc)
+GROUP BY time
+ORDER BY time;
 ```
 
 **Jupyter Notebook Integration**:
@@ -1176,6 +1293,7 @@ ORDER BY time;
 import clickhouse_connect
 import pandas as pd
 import matplotlib.pyplot as plt
+import json
 
 # Connect to ClickHouse
 client = clickhouse_connect.get_client(
@@ -1209,6 +1327,44 @@ plt.title('Gas Utilization Over Time')
 plt.xlabel('Time')
 plt.ylabel('Gas Utilization (%)')
 plt.show()
+
+# Analyze attester slashing data
+slashing_df = client.query_df("""
+    SELECT 
+        slot,
+        total_slashed_validators,
+        att_1_attesting_indices,
+        att_2_attesting_indices,
+        timestamp_utc
+    FROM attester_slashings
+    WHERE timestamp_utc >= now() - INTERVAL 30 DAY
+""")
+
+# Parse JSON validator indices
+def parse_indices(indices_json):
+    try:
+        return json.loads(indices_json)
+    except:
+        return []
+
+slashing_df['att_1_indices'] = slashing_df['att_1_attesting_indices'].apply(parse_indices)
+slashing_df['att_2_indices'] = slashing_df['att_2_attesting_indices'].apply(parse_indices)
+
+# Analyze validator overlap in slashings
+overlaps = []
+for _, row in slashing_df.iterrows():
+    att_1_set = set(row['att_1_indices'])
+    att_2_set = set(row['att_2_indices'])
+    overlap = len(att_1_set.intersection(att_2_set))
+    overlaps.append(overlap)
+
+slashing_df['validator_overlap'] = overlaps
+
+print("Attester Slashing Analysis:")
+print(f"Total slashing events: {len(slashing_df)}")
+print(f"Total validators slashed: {slashing_df['total_slashed_validators'].sum()}")
+print(f"Average validators per slashing: {slashing_df['total_slashed_validators'].mean():.2f}")
+print(f"Average validator overlap: {slashing_df['validator_overlap'].mean():.2f}")
 ```
 
 ## Best Practices

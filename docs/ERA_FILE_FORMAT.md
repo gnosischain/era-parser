@@ -8,8 +8,9 @@
 5. [Understanding Slot and Era Mapping](#understanding-slot-and-era-mapping)
 6. [BeaconBlockBody Structure Evolution](#beaconblockbody-structure-evolution)
 7. [Critical SSZ Parsing Concepts](#critical-ssz-parsing-concepts)
-8. [Parsing Implementation Guide](#parsing-implementation-guide)
-9. [Tools & Utilities](#tools--utilities)
+8. [Fixed-Size vs Variable-Size Data Structures](#fixed-size-vs-variable-size-data-structures)
+9. [Parsing Implementation Guide](#parsing-implementation-guide)
+10. [Tools & Utilities](#tools--utilities)
 
 ## What are ERA Files?
 
@@ -227,6 +228,161 @@ def parse_list_of_items(data: bytes, item_parser_func):
     # ... parse using offsets
 ```
 
+## Fixed-Size vs Variable-Size Data Structures
+
+### The Critical Distinction
+
+One of the most important aspects of SSZ parsing is correctly identifying whether a data structure uses **fixed-size** or **variable-size** encoding. Getting this wrong leads to parsing errors like:
+
+```
+Invalid offset table for parse_deposit, first_offset=1707068757, trying fallback parsing
+```
+
+### Fixed-Size Data Structures
+
+These structures have a **known, constant byte size** and are parsed **directly** without offset tables:
+
+#### Deposits (1240 bytes)
+```python
+# Structure: 33 × 32-byte proof hashes + 184 bytes deposit data
+proof: Vector[Bytes32, 33]       # 1056 bytes (33 × 32)
+data: DepositData               # 184 bytes
+  - pubkey: BLSPubkey           # 48 bytes
+  - withdrawal_credentials: Bytes32  # 32 bytes  
+  - amount: uint64              # 8 bytes
+  - signature: BLSSignature     # 96 bytes
+# Total: 1056 + 184 = 1240 bytes
+```
+
+#### Withdrawals (44 bytes)
+```python
+# Structure: Fixed withdrawal data
+index: uint64                   # 8 bytes
+validator_index: uint64         # 8 bytes
+address: ExecutionAddress       # 20 bytes
+amount: uint64                  # 8 bytes
+# Total: 44 bytes
+```
+
+#### Voluntary Exits (112 bytes)
+```python
+# Structure: Exit message + signature
+message:                        # 16 bytes
+  - epoch: uint64               # 8 bytes
+  - validator_index: uint64     # 8 bytes
+signature: BLSSignature         # 96 bytes
+# Total: 16 + 96 = 112 bytes
+```
+
+#### KZG Commitments (48 bytes)
+```python
+# Structure: Single BLS12-381 G1 point
+commitment: BLSCommitment       # 48 bytes
+```
+
+#### Execution Requests (Fixed per type)
+```python
+# Deposit Request: 192 bytes
+pubkey: BLSPubkey               # 48 bytes
+withdrawal_credentials: Bytes32  # 32 bytes
+amount: uint64                  # 8 bytes
+signature: BLSSignature         # 96 bytes
+index: uint64                   # 8 bytes
+# Total: 192 bytes
+
+# Withdrawal Request: 76 bytes
+source_address: ExecutionAddress # 20 bytes
+validator_pubkey: BLSPubkey     # 48 bytes
+amount: uint64                  # 8 bytes
+# Total: 76 bytes
+
+# Consolidation Request: 116 bytes
+source_address: ExecutionAddress # 20 bytes
+source_pubkey: BLSPubkey        # 48 bytes
+target_pubkey: BLSPubkey        # 48 bytes
+# Total: 116 bytes
+```
+
+### Variable-Size Data Structures
+
+These structures use **SSZ offset tables** to indicate where each item starts and ends:
+
+#### Attestations
+```python
+# Structure: Variable-length with offset table
+attesting_indices: List[ValidatorIndex, MAX_VALIDATORS] # Variable!
+data: AttestationData           # Fixed 128 bytes
+signature: BLSSignature         # 96 bytes
+```
+
+#### Proposer/Attester Slashings
+```python
+# Structure: Multiple variable-length components
+signed_header_1: SignedBeaconBlockHeader    # Variable
+signed_header_2: SignedBeaconBlockHeader    # Variable
+# OR
+attestation_1: IndexedAttestation           # Variable  
+attestation_2: IndexedAttestation           # Variable
+```
+
+### Era Parser's Fixed-Size Parser Registry
+
+```python
+fixed_size_parsers = {
+    'parse_withdrawal': 44,           # Execution withdrawals
+    'parse_deposit_request': 192,     # Electra deposit requests  
+    'parse_withdrawal_request': 76,   # Electra withdrawal requests
+    'parse_consolidation_request': 116, # Electra consolidation requests
+    'parse_kzg_commitment': 48,       # Deneb blob commitments
+    'parse_voluntary_exit': 112,      # Voluntary validator exits
+    'parse_deposit': 1240,            # Beacon chain deposits (THE KEY FIX!)
+}
+```
+
+### Parsing Logic Flow
+
+```python
+def parse_list_of_items(data: bytes, item_parser_func: Callable) -> List[Any]:
+    parser_name = item_parser_func.__name__
+    
+    # Step 1: Check if this is a fixed-size structure
+    if parser_name in fixed_size_parsers:
+        item_size = fixed_size_parsers[parser_name]
+        num_items = len(data) // item_size
+        
+        # Parse each fixed-size chunk directly
+        for i in range(num_items):
+            item_data = data[i*item_size : (i+1)*item_size]
+            parsed = item_parser_func(item_data)
+            items.append(parsed)
+        return items
+    
+    # Step 2: Variable-size structures use offset tables
+    first_offset = read_uint32_at(data, 0)
+    
+    # Validate offset table
+    if first_offset < 4 or first_offset > len(data):
+        # Invalid offset table - this might be fixed-size data!
+        print(f"Invalid offset table for {parser_name}, first_offset={first_offset}")
+        return fallback_parsing(data, item_parser_func)
+    
+    # Parse using offset table...
+```
+
+### Common Parsing Errors and Solutions
+
+**Error**: `Invalid offset table for parse_deposit`
+**Cause**: Deposits treated as variable-size when they're fixed-size
+**Solution**: Add `'parse_deposit': 1240` to `fixed_size_parsers`
+
+**Error**: `Invalid offset table for parse_voluntary_exit`  
+**Cause**: Voluntary exits treated as variable-size when they're fixed-size
+**Solution**: Add `'parse_voluntary_exit': 112` to `fixed_size_parsers`
+
+**Error**: Attestations parsing incorrectly
+**Cause**: Attestations are truly variable-size and need offset table parsing
+**Solution**: Keep attestations OUT of `fixed_size_parsers` - they use offsets correctly
+
 ## Parsing Implementation Guide
 
 ### 1. Era File Navigation 
@@ -311,6 +467,81 @@ class AltairParser(BaseForkParser):
         pass
 ```
 
+### 4. Enhanced Attester Slashing Parsing
+
+```python
+def parse_attester_slashing(self, data: bytes) -> Optional[Dict[str, Any]]:
+    """Parse attester slashing with full validator indices support"""
+    try:
+        if len(data) < 8:
+            return None
+        
+        # Read offsets for two IndexedAttestations
+        attestation_1_offset = read_uint32_at(data, 0)
+        attestation_2_offset = read_uint32_at(data, 4)
+        
+        # Parse both attestations
+        attestation_1_data = data[attestation_1_offset:attestation_2_offset]
+        attestation_2_data = data[attestation_2_offset:]
+        
+        attestation_1 = self.parse_indexed_attestation(attestation_1_data)
+        attestation_2 = self.parse_indexed_attestation(attestation_2_data)
+        
+        if not attestation_1 or not attestation_2:
+            return None
+        
+        return {
+            "attestation_1": attestation_1,  # Includes attesting_indices array
+            "attestation_2": attestation_2   # Includes attesting_indices array
+        }
+        
+    except Exception as e:
+        return None
+
+def parse_indexed_attestation(self, data: bytes) -> Optional[Dict[str, Any]]:
+    """Parse IndexedAttestation with validator indices array"""
+    try:
+        # Read offset for attesting_indices
+        indices_offset = read_uint32_at(data, 0)
+        
+        # Parse AttestationData (fixed 128 bytes)
+        att_data_raw = data[4:132]
+        attestation_data = {
+            "slot": str(read_uint64_at(att_data_raw, 0)),
+            "index": str(read_uint64_at(att_data_raw, 8)),
+            "beacon_block_root": "0x" + att_data_raw[16:48].hex(),
+            "source": {
+                "epoch": str(read_uint64_at(att_data_raw, 48)),
+                "root": "0x" + att_data_raw[56:88].hex()
+            },
+            "target": {
+                "epoch": str(read_uint64_at(att_data_raw, 88)),
+                "root": "0x" + att_data_raw[96:128].hex()
+            }
+        }
+        
+        # Parse signature (96 bytes)
+        signature = "0x" + data[132:228].hex()
+        
+        # Parse attesting_indices (variable length list)
+        indices_data = data[indices_offset:]
+        attesting_indices = []
+        
+        # Parse as consecutive uint64 values
+        for i in range(0, len(indices_data) - 7, 8):
+            index = read_uint64_at(indices_data, i)
+            attesting_indices.append(str(index))
+        
+        return {
+            "attesting_indices": attesting_indices,  # This is the key enhancement!
+            "data": attestation_data,
+            "signature": signature
+        }
+        
+    except Exception:
+        return None
+```
+
 ## Tools & Utilities
 
 ### 1. Era File Analysis
@@ -320,6 +551,9 @@ era-parser stats example-02612-24eac76f.era
 
 # Extract specific block  
 era-parser example-02612-24eac76f.era block 21385280
+
+# Check for parsing issues
+era-parser example-02612-24eac76f.era all-blocks test.json --separate
 ```
 
 ### 2. SSZ Debugging
@@ -359,26 +593,67 @@ from era_parser.config.networks import NETWORK_CONFIGS
 print("Available networks:", list(NETWORK_CONFIGS.keys()))
 ```
 
-### 4. Field Size Reference 
+### 4. Fixed-Size Field Reference 
 ```python
 # Fixed-size items handled by parse_list_of_items in ssz_utils.py
 from era_parser.parsing.ssz_utils import parse_list_of_items
 
 FIELD_SIZES = {
     # Fixed-size fields (embedded inline)
-    "sync_aggregate": 160,
+    "sync_aggregate": 160,  # 64 + 96 bytes
     
     # Fixed-size items (parsed without offset tables)
-    "withdrawal": 44,
-    "deposit_request": 192,    # 48+32+8+96+8
-    "withdrawal_request": 76,  # 20+48+8  
-    "consolidation_request": 116, # 20+48+48
+    "withdrawal": 44,           # 8+8+20+8 bytes
+    "deposit": 1240,            # 1056+184 bytes (THE CRITICAL FIX!)
+    "voluntary_exit": 112,      # 8+8+96 bytes  
+    "kzg_commitment": 48,       # 48 bytes
+    "deposit_request": 192,     # 48+32+8+96+8 bytes
+    "withdrawal_request": 76,   # 20+48+8 bytes
+    "consolidation_request": 116, # 20+48+48 bytes
 }
 
 # The new parser automatically handles these in fork-specific parsers:
 # - AltairParser handles sync_aggregate
-# - CapellaParser adds withdrawal parsing
+# - CapellaParser adds withdrawal parsing  
 # - ElectraParser adds execution request parsing
+# - ALL parsers now handle deposits correctly!
+```
+
+### 5. Parsing Validation Tools
+
+```python
+# Test fixed-size parsing
+def validate_fixed_size_parsing():
+    """Validate that fixed-size structures parse correctly"""
+    
+    # Test deposit parsing (1240 bytes)
+    test_deposit_data = b'\x00' * 1240  # Mock 1240-byte deposit
+    deposits = parse_list_of_items(test_deposit_data, parse_deposit)
+    assert len(deposits) == 1, f"Expected 1 deposit, got {len(deposits)}"
+    
+    # Test multiple deposits (2480 bytes = 2 deposits)  
+    test_multi_deposits = b'\x00' * 2480
+    deposits = parse_list_of_items(test_multi_deposits, parse_deposit)
+    assert len(deposits) == 2, f"Expected 2 deposits, got {len(deposits)}"
+    
+    # Test withdrawal parsing (44 bytes)
+    test_withdrawal_data = b'\x00' * 44
+    withdrawals = parse_list_of_items(test_withdrawal_data, parse_withdrawal)
+    assert len(withdrawals) == 1, f"Expected 1 withdrawal, got {len(withdrawals)}"
+    
+    print("✅ All fixed-size parsing tests passed!")
+
+# Test variable-size parsing
+def validate_variable_size_parsing():
+    """Validate that variable-size structures still use offset tables"""
+    
+    # Attestations should NOT be in fixed_size_parsers
+    assert 'parse_attestation' not in fixed_size_parsers
+    
+    # Attester slashings should NOT be in fixed_size_parsers  
+    assert 'parse_attester_slashing' not in fixed_size_parsers
+    
+    print("✅ Variable-size parsing validation passed!")
 ```
 
 ## Testing with Your Era File
@@ -394,13 +669,80 @@ Use the era number to find valid slots within that era's range.
 ### 3. Determine the Fork
 Calculate the epoch from your target slot to determine which fork structure to expect.
 
-### 4. Test the Parser
+### 4. Test the Parser with Fixed-Size Awareness
 ```bash
+# Test basic parsing (should no longer show offset table errors)
 era-parser your-era-file.era block <target_slot>
+
+# Test full data extraction (includes enhanced attester slashing data)
+era-parser your-era-file.era all-blocks test_output.json --separate
+
+# Test ClickHouse export (with updated schema)
+era-parser your-era-file.era all-blocks --export clickhouse
 ```
 
-### 5. Verify Fork Compatibility
+### 5. Verify Enhanced Data Extraction
+
+Check that the enhanced attester slashing data is properly extracted:
+
+```python
+import json
+
+# Load exported data
+with open('test_output_attester_slashings.json', 'r') as f:
+    data = json.load(f)
+
+# Verify enhanced fields are present
+for slashing in data.get('data', []):
+    assert 'att_1_attesting_indices' in slashing
+    assert 'att_2_attesting_indices' in slashing  
+    assert 'att_1_validator_count' in slashing
+    assert 'att_2_validator_count' in slashing
+    assert 'total_slashed_validators' in slashing
+    
+    # Verify indices are JSON arrays
+    att_1_indices = json.loads(slashing['att_1_attesting_indices'])
+    att_2_indices = json.loads(slashing['att_2_attesting_indices'])
+    
+    # Verify counts match array lengths
+    assert len(att_1_indices) == slashing['att_1_validator_count']
+    assert len(att_2_indices) == slashing['att_2_validator_count']
+    
+    print(f"✅ Slashing at slot {slashing['slot']}: {slashing['total_slashed_validators']} validators")
+```
+
+### 6. Verify Fork Compatibility
 Make sure your parser handles the correct fork for the era you're testing. Different eras may contain blocks from different forks depending on when fork transitions occurred.
+
+### 7. Debug Any Remaining Issues
+
+If you still see parsing errors:
+
+```python
+# Check if new data types need to be added to fixed_size_parsers
+def debug_unknown_structure(data: bytes, parser_name: str):
+    """Debug unknown data structure to determine if it's fixed-size"""
+    
+    print(f"Debugging {parser_name}:")
+    print(f"  Data length: {len(data)} bytes")
+    
+    # Check if length is divisible by common fixed sizes
+    common_sizes = [32, 44, 48, 76, 96, 112, 116, 192, 1240]
+    for size in common_sizes:
+        if len(data) % size == 0:
+            items = len(data) // size
+            print(f"  Could be {items} items of {size} bytes each")
+    
+    # Try reading as offset table
+    if len(data) >= 4:
+        first_offset = read_uint32_at(data, 0)
+        print(f"  First offset: {first_offset}")
+        if first_offset < len(data) and first_offset % 4 == 0:
+            num_items = first_offset // 4
+            print(f"  Potential items from offset table: {num_items}")
+        else:
+            print(f"  Invalid offset table - likely fixed-size structure!")
+```
 
 ## Conclusion
 
@@ -410,5 +752,7 @@ ERA files provide a robust archival format for Ethereum beacon chain data, but r
 2. **Fork evolution**: Each fork adds new fields in specific positions
 3. **SSZ semantics**: Proper offset calculation and list parsing strategies
 4. **Era structure**: How slots map to eras and files
+5. **Fixed vs Variable distinction**: The critical importance of correctly identifying data structure types
+6. **Enhanced data extraction**: Capturing complete validator information in slashing events
 
-This understanding is crucial for implementing robust era file parsers that can handle the full spectrum of Ethereum beacon chain history.
+The **fixed-size parser registry** is crucial for preventing offset table errors with structures like deposits, withdrawals, and voluntary exits. The **enhanced attester slashing parsing** enables comprehensive validator tracking and slashing analysis.

@@ -31,6 +31,7 @@ Era Parser extracts data from beacon chain era files using fork-specific parsers
 3. **Graceful Degradation**: Missing or malformed data results in default values, not parsing failures
 4. **Consistent Types**: All numeric values are converted to appropriate types (strings for large numbers)
 5. **Hex Encoding**: All hash values and binary data are hex-encoded with `0x` prefix
+6. **Fixed-Size SSZ Parsing**: Specialized handling for fixed-size data structures to avoid offset table errors
 
 ## Core Tables
 
@@ -224,7 +225,7 @@ def parse_withdrawal(self, data: bytes) -> Optional[Dict[str, Any]]:
 
 **Purpose**: Validator deposit data for new validator registrations
 
-**Parsing Logic**: Parses deposit objects with proof data and deposit information. Deposits are 1240 bytes: 1056 bytes of proof + 184 bytes of deposit data.
+**Parsing Logic**: Parses deposit objects with proof data and deposit information. Deposits are 1240 bytes: 1056 bytes of proof + 184 bytes of deposit data. **Fixed-size parsing** prevents SSZ offset table errors.
 
 | Field | Type | Source | Description | Parsing Notes |
 |-------|------|--------|-------------|---------------|
@@ -237,8 +238,11 @@ def parse_withdrawal(self, data: bytes) -> Optional[Dict[str, Any]]:
 | `proof` | String | `deposit.proof` | Merkle proof | JSON array of 33 32-byte hashes |
 | `timestamp_utc` | DateTime | Block timestamp | Deposit inclusion timestamp | Same as containing block |
 
-**Parsing Implementation**:
+**Fixed-Size Parsing**:
 ```python
+# In fixed_size_parsers dictionary
+'parse_deposit': 1240  # 33*32 + 184 bytes (proof + deposit data)
+
 def parse_deposit(self, data: bytes) -> Optional[Dict[str, Any]]:
     """Parse deposit with 33-element proof and deposit data"""
     if len(data) < 1240:  # 33*32 + 184 bytes
@@ -268,7 +272,7 @@ def parse_deposit(self, data: bytes) -> Optional[Dict[str, Any]]:
 
 **Purpose**: Voluntary validator exit requests
 
-**Parsing Logic**: Parses voluntary exit messages showing validators requesting to exit the network.
+**Parsing Logic**: Parses voluntary exit messages showing validators requesting to exit the network. **Fixed-size parsing** (112 bytes) prevents offset errors.
 
 | Field | Type | Source | Description | Parsing Notes |
 |-------|------|--------|-------------|---------------|
@@ -278,6 +282,12 @@ def parse_deposit(self, data: bytes) -> Optional[Dict[str, Any]]:
 | `epoch` | UInt64 | `voluntary_exit.message.epoch` | Exit epoch | When exit takes effect |
 | `validator_index` | UInt64 | `voluntary_exit.message.validator_index` | Exiting validator | Validator index |
 | `timestamp_utc` | DateTime | Block timestamp | Exit request timestamp | Same as containing block |
+
+**Fixed-Size Parsing**:
+```python
+# In fixed_size_parsers dictionary
+'parse_voluntary_exit': 112  # 8 + 8 + 96 bytes (epoch + validator_index + signature)
+```
 
 ---
 
@@ -311,31 +321,91 @@ def parse_deposit(self, data: bytes) -> Optional[Dict[str, Any]]:
 
 ## attester_slashings Table
 
-**Purpose**: Evidence of attester violations (conflicting attestations)
+**Purpose**: Evidence of attester violations (conflicting attestations) with comprehensive validator tracking
 
-**Parsing Logic**: Parses attester slashing evidence containing two conflicting attestations that violate slashing conditions.
+**Parsing Logic**: Parses attester slashing evidence containing two conflicting attestations that violate slashing conditions. Enhanced to capture all attesting validator indices and provide comprehensive analysis capabilities.
 
 | Field | Type | Source | Description | Parsing Notes |
 |-------|------|--------|-------------|---------------|
 | `slot` | UInt64 | Block slot | Beacon block slot | Links to blocks table |
 | `slashing_index` | UInt64 | Array index | Index within block | 0-based position |
+| **Attestation 1 Data** |
 | `att_1_slot` | UInt64 | `attestation_1.data.slot` | First attestation slot | From first attestation |
 | `att_1_committee_index` | UInt64 | `attestation_1.data.index` | First committee index | Committee that made attestation |
 | `att_1_beacon_block_root` | String | `attestation_1.data.beacon_block_root` | First block root | 32-byte hash |
 | `att_1_source_epoch` | UInt64 | `attestation_1.data.source.epoch` | First source epoch | Source checkpoint |
+| `att_1_source_root` | String | `attestation_1.data.source.root` | First source root | 32-byte hash |
 | `att_1_target_epoch` | UInt64 | `attestation_1.data.target.epoch` | First target epoch | Target checkpoint |
+| `att_1_target_root` | String | `attestation_1.data.target.root` | First target root | 32-byte hash |
 | `att_1_signature` | String | `attestation_1.signature` | First signature | 96-byte aggregate signature |
+| `att_1_attesting_indices` | String | `attestation_1.attesting_indices` | **First validator indices** | **JSON array of validator indices** |
+| `att_1_validator_count` | UInt32 | Calculated | **First validator count** | **Length of attesting_indices array** |
+| **Attestation 2 Data** |
 | `att_2_slot` | UInt64 | `attestation_2.data.slot` | Second attestation slot | From second attestation |
 | `att_2_committee_index` | UInt64 | `attestation_2.data.index` | Second committee index | Committee that made attestation |
 | `att_2_beacon_block_root` | String | `attestation_2.data.beacon_block_root` | Second block root | 32-byte hash |
 | `att_2_source_epoch` | UInt64 | `attestation_2.data.source.epoch` | Second source epoch | Source checkpoint |
+| `att_2_source_root` | String | `attestation_2.data.source.root` | Second source root | 32-byte hash |
 | `att_2_target_epoch` | UInt64 | `attestation_2.data.target.epoch` | Second target epoch | Target checkpoint |
+| `att_2_target_root` | String | `attestation_2.data.target.root` | Second target root | 32-byte hash |
 | `att_2_signature` | String | `attestation_2.signature` | Second signature | 96-byte aggregate signature |
+| `att_2_attesting_indices` | String | `attestation_2.attesting_indices` | **Second validator indices** | **JSON array of validator indices** |
+| `att_2_validator_count` | UInt32 | Calculated | **Second validator count** | **Length of attesting_indices array** |
+| **Metadata** |
 | `timestamp_utc` | DateTime | Block timestamp | Slashing evidence timestamp | Same as containing block |
+| `total_slashed_validators` | UInt32 | Calculated | **Total unique validators** | **Count of unique validators across both attestations** |
+
+**Enhanced Parsing Implementation**:
+```python
+# Attester Slashings - FULL data with validator indices
+for slash_idx, slashing in enumerate(attester_slashings):
+    attestation_1 = slashing.get("attestation_1", {})
+    attestation_2 = slashing.get("attestation_2", {})
+    
+    # Get attesting indices arrays
+    att_1_indices = attestation_1.get("attesting_indices", [])
+    att_2_indices = attestation_2.get("attesting_indices", [])
+    
+    # Calculate total unique slashed validators
+    all_indices = set(att_1_indices + att_2_indices)
+    
+    all_data['attester_slashings'].append({
+        "slot": slot,
+        "slashing_index": slash_idx,
+        "att_1_slot": attestation_1.get("data", {}).get("slot"),
+        "att_1_committee_index": attestation_1.get("data", {}).get("index"),
+        "att_1_beacon_block_root": attestation_1.get("data", {}).get("beacon_block_root"),
+        "att_1_source_epoch": attestation_1.get("data", {}).get("source", {}).get("epoch"),
+        "att_1_source_root": attestation_1.get("data", {}).get("source", {}).get("root"),
+        "att_1_target_epoch": attestation_1.get("data", {}).get("target", {}).get("epoch"),
+        "att_1_target_root": attestation_1.get("data", {}).get("target", {}).get("root"),
+        "att_1_signature": attestation_1.get("signature"),
+        "att_1_attesting_indices": json.dumps(att_1_indices),  # Store as JSON
+        "att_1_validator_count": len(att_1_indices),
+        "att_2_slot": attestation_2.get("data", {}).get("slot"),
+        "att_2_committee_index": attestation_2.get("data", {}).get("index"),
+        "att_2_beacon_block_root": attestation_2.get("data", {}).get("beacon_block_root"),
+        "att_2_source_epoch": attestation_2.get("data", {}).get("source", {}).get("epoch"),
+        "att_2_source_root": attestation_2.get("data", {}).get("source", {}).get("root"),
+        "att_2_target_epoch": attestation_2.get("data", {}).get("target", {}).get("epoch"),
+        "att_2_target_root": attestation_2.get("data", {}).get("target", {}).get("root"),
+        "att_2_signature": attestation_2.get("signature"),
+        "att_2_attesting_indices": json.dumps(att_2_indices),  # Store as JSON
+        "att_2_validator_count": len(att_2_indices),
+        "timestamp_utc": timestamp_utc,
+        "total_slashed_validators": len(all_indices),
+    })
+```
 
 **Slashing Conditions**: 
 1. **Double voting**: Two different votes for the same target epoch
 2. **Surround voting**: One attestation surrounds another
+
+**Analysis Capabilities**:
+- Track individual validators involved in slashings
+- Calculate slashing impact and validator overlap
+- Analyze committee-level slashing patterns
+- Query specific validator slashing history
 
 ---
 
@@ -363,7 +433,7 @@ def parse_deposit(self, data: bytes) -> Optional[Dict[str, Any]]:
 
 **Purpose**: Blob KZG commitments (Deneb+ forks, EIP-4844)
 
-**Parsing Logic**: Extracts KZG commitments for blob transactions from the blob_kzg_commitments array.
+**Parsing Logic**: Extracts KZG commitments for blob transactions from the blob_kzg_commitments array. **Fixed-size parsing** (48 bytes each).
 
 | Field | Type | Source | Description | Parsing Notes |
 |-------|------|--------|-------------|---------------|
@@ -371,6 +441,12 @@ def parse_deposit(self, data: bytes) -> Optional[Dict[str, Any]]:
 | `commitment_index` | UInt64 | Array index | Index within block | 0-based position in commitments array |
 | `commitment` | String | `blob_kzg_commitments[i]` | KZG commitment | 48-byte commitment to blob data |
 | `timestamp_utc` | DateTime | Block timestamp | Commitment timestamp | Same as containing block |
+
+**Fixed-Size Parsing**:
+```python
+# In fixed_size_parsers dictionary
+'parse_kzg_commitment': 48  # 48-byte KZG commitment
+```
 
 **EIP-4844 Context**: Blob commitments enable data availability for rollups while keeping the actual blob data off-chain.
 
@@ -398,7 +474,14 @@ def parse_deposit(self, data: bytes) -> Optional[Dict[str, Any]]:
 | `target_pubkey` | String | Request data | Target validator key (consolidations) | 48-byte key |
 | `timestamp_utc` | DateTime | Block timestamp | Request timestamp | Same as containing block |
 
-**Request Types**:
+**Request Types and Fixed-Size Parsing**:
+```python
+# In fixed_size_parsers dictionary
+'parse_deposit_request': 192,     # 48+32+8+96+8 bytes
+'parse_withdrawal_request': 76,   # 20+48+8 bytes  
+'parse_consolidation_request': 116, # 20+48+48 bytes
+```
+
 1. **Deposit Requests**: Execution layer initiated validator deposits
 2. **Withdrawal Requests**: Execution layer initiated withdrawals
 3. **Consolidation Requests**: Merge multiple validators into one
@@ -424,6 +507,67 @@ def parse_execution_requests(self, data: bytes) -> Dict[str, Any]:
 
 ---
 
+## SSZ Parsing and Fixed-Size Data Structures
+
+### Fixed-Size Parsers Dictionary
+
+Era Parser uses a specialized `fixed_size_parsers` dictionary to handle data structures with known, constant byte sizes. This prevents SSZ offset table parsing errors for structures that don't use variable-length encoding:
+
+```python
+fixed_size_parsers = {
+    'parse_withdrawal': 44,           # 8+8+20+8 bytes
+    'parse_deposit_request': 192,     # 48+32+8+96+8 bytes
+    'parse_withdrawal_request': 76,   # 20+48+8 bytes
+    'parse_consolidation_request': 116, # 20+48+48 bytes
+    'parse_kzg_commitment': 48,       # 48-byte KZG commitment
+    'parse_voluntary_exit': 112,      # 8+8+96 bytes
+    'parse_deposit': 1240,            # 1056+184 bytes (33*32 + 48+32+8+96)
+}
+```
+
+### Why Fixed-Size Parsing Matters
+
+**Problem**: Some Ethereum data structures are fixed-size but were being parsed using variable-size SSZ offset tables, causing errors like:
+```
+Invalid offset table for parse_deposit, first_offset=1707068757, trying fallback parsing
+```
+
+**Solution**: Recognize these structures as fixed-size and parse them directly:
+```python
+if parser_name in fixed_size_parsers:
+    item_size = fixed_size_parsers[parser_name]  # e.g., 1240 for deposits
+    num_items = len(data) // item_size           # e.g., 2480 ÷ 1240 = 2 deposits
+    
+    for i in range(num_items):
+        item_data = data[i*item_size : (i+1)*item_size]  # Extract each chunk
+        parsed = item_parser_func(item_data)             # Parse the individual item
+        items.append(parsed)
+```
+
+### Byte Structure Details
+
+**Deposits (1240 bytes)**:
+- Merkle proof: 33 × 32 bytes = 1056 bytes
+- Deposit data: 48+32+8+96 bytes = 184 bytes
+- Total: 1056 + 184 = 1240 bytes
+
+**Withdrawals (44 bytes)**:
+- index: 8 bytes (uint64)
+- validator_index: 8 bytes (uint64) 
+- address: 20 bytes (Ethereum address)
+- amount: 8 bytes (uint64)
+- Total: 44 bytes
+
+**Voluntary Exits (112 bytes)**:
+- epoch: 8 bytes (uint64)
+- validator_index: 8 bytes (uint64)
+- signature: 96 bytes (BLS signature)
+- Total: 112 bytes
+
+This approach ensures reliable parsing across all beacon chain forks and prevents the offset table errors that were occurring with deposits and other fixed-size structures.
+
+---
+
 ## Data Export Considerations
 
 ### ClickHouse Optimizations
@@ -431,10 +575,11 @@ def parse_execution_requests(self, data: bytes) -> Dict[str, Any]:
 - **Ordering**: Primary keys are optimized for common query patterns
 - **Data Types**: Large numbers are stored as strings to avoid overflow issues
 - **Compression**: ClickHouse's native compression handles repetitive hash prefixes efficiently
+- **JSON Storage**: Validator indices arrays stored as JSON strings for flexible querying
 
 ### File Export Formats
 - **JSON**: Preserves full nested structure and type information
-- **CSV**: Flattened with JSON-encoded complex fields
+- **CSV**: Flattened with JSON-encoded complex fields (including validator indices)
 - **Parquet**: Efficient columnar storage with proper type preservation
 - **Separate Files**: `--separate` flag creates one file per table for easier analysis
 
@@ -443,3 +588,46 @@ def parse_execution_requests(self, data: bytes) -> Dict[str, Any]:
 - **Processing Speed**: ~8192 blocks processed in seconds with progress indicators
 - **Storage**: ClickHouse provides 10x+ compression compared to JSON files
 - **Query Performance**: Indexed fields enable sub-second queries on millions of records
+- **Validator Tracking**: JSON arrays allow efficient validator-specific queries using ClickHouse JSON functions
+
+### Enhanced Attester Slashing Analysis
+
+The updated attester slashing table enables sophisticated analysis:
+
+```sql
+-- Find validators involved in multiple slashings
+SELECT 
+    validator_id,
+    count() as slashing_events
+FROM (
+    SELECT arrayJoin(JSONExtract(att_1_attesting_indices, 'Array(UInt64)')) as validator_id
+    FROM attester_slashings
+    UNION ALL
+    SELECT arrayJoin(JSONExtract(att_2_attesting_indices, 'Array(UInt64)')) as validator_id
+    FROM attester_slashings
+)
+GROUP BY validator_id
+HAVING slashing_events > 1
+ORDER BY slashing_events DESC;
+
+-- Analyze slashing patterns by committee
+SELECT 
+    att_1_committee_index,
+    count() as slashing_events,
+    avg(total_slashed_validators) as avg_validators_per_slashing,
+    sum(total_slashed_validators) as total_validators_affected
+FROM attester_slashings
+GROUP BY att_1_committee_index
+ORDER BY slashing_events DESC;
+
+-- Track validator overlap between conflicting attestations
+SELECT 
+    slot,
+    total_slashed_validators,
+    att_1_validator_count,
+    att_2_validator_count,
+    att_1_validator_count + att_2_validator_count - total_slashed_validators as validator_overlap
+FROM attester_slashings
+WHERE att_1_validator_count + att_2_validator_count > total_slashed_validators
+ORDER BY validator_overlap DESC;
+```
