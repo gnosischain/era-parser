@@ -413,7 +413,7 @@ for slash_idx, slashing in enumerate(attester_slashings):
 
 **Purpose**: BLS to execution address changes (Capella+ forks)
 
-**Parsing Logic**: Parses BLS to execution changes allowing validators to update their withdrawal credentials.
+**Parsing Logic**: Parses BLS to execution changes allowing validators to update their withdrawal credentials. **Fixed-size parsing** (172 bytes) prevents offset table errors.
 
 | Field | Type | Source | Description | Parsing Notes |
 |-------|------|--------|-------------|---------------|
@@ -424,6 +424,32 @@ for slash_idx, slashing in enumerate(attester_slashings):
 | `from_bls_pubkey` | String | `bls_change.message.from_bls_pubkey` | Old BLS public key | 48-byte public key |
 | `to_execution_address` | String | `bls_change.message.to_execution_address` | New execution address | 20-byte address |
 | `timestamp_utc` | DateTime | Block timestamp | Change timestamp | Same as containing block |
+
+**Fixed-Size Parsing**:
+```python
+# In fixed_size_parsers dictionary
+'parse_bls_to_execution_change': 172  # 8+48+20+96 bytes (validator_index + pubkey + address + signature)
+
+def parse_bls_to_execution_change(self, data: bytes) -> Optional[Dict[str, Any]]:
+    """Parse BLS change - 172 bytes fixed size"""
+    if len(data) < 172:
+        return None
+    
+    pos = 0
+    validator_index = str(read_uint64_at(data, pos)); pos += 8
+    from_bls_pubkey = "0x" + data[pos:pos + 48].hex(); pos += 48
+    to_execution_address = "0x" + data[pos:pos + 20].hex(); pos += 20
+    signature = "0x" + data[pos:pos + 96].hex()
+    
+    return {
+        "message": {
+            "validator_index": validator_index,
+            "from_bls_pubkey": from_bls_pubkey,
+            "to_execution_address": to_execution_address
+        },
+        "signature": signature
+    }
+```
 
 **Purpose**: Allows validators to change from BLS withdrawal credentials to execution layer addresses for more flexible withdrawals.
 
@@ -522,6 +548,7 @@ fixed_size_parsers = {
     'parse_kzg_commitment': 48,       # 48-byte KZG commitment
     'parse_voluntary_exit': 112,      # 8+8+96 bytes
     'parse_deposit': 1240,            # 1056+184 bytes (33*32 + 48+32+8+96)
+    'parse_bls_to_execution_change': 172, # 8+48+20+96 bytes (FIXED!)
 }
 ```
 
@@ -530,13 +557,14 @@ fixed_size_parsers = {
 **Problem**: Some Ethereum data structures are fixed-size but were being parsed using variable-size SSZ offset tables, causing errors like:
 ```
 Invalid offset table for parse_deposit, first_offset=1707068757, trying fallback parsing
+Invalid offset table for parse_bls_to_execution_change, first_offset=189474
 ```
 
 **Solution**: Recognize these structures as fixed-size and parse them directly:
 ```python
 if parser_name in fixed_size_parsers:
-    item_size = fixed_size_parsers[parser_name]  # e.g., 1240 for deposits
-    num_items = len(data) // item_size           # e.g., 2480 ÷ 1240 = 2 deposits
+    item_size = fixed_size_parsers[parser_name]  # e.g., 172 for BLS changes
+    num_items = len(data) // item_size           # e.g., 2752 ÷ 172 = 16 changes
     
     for i in range(num_items):
         item_data = data[i*item_size : (i+1)*item_size]  # Extract each chunk
@@ -564,7 +592,34 @@ if parser_name in fixed_size_parsers:
 - signature: 96 bytes (BLS signature)
 - Total: 112 bytes
 
-This approach ensures reliable parsing across all beacon chain forks and prevents the offset table errors that were occurring with deposits and other fixed-size structures.
+**BLS to Execution Changes (172 bytes)**:
+- validator_index: 8 bytes (uint64)
+- from_bls_pubkey: 48 bytes (BLS public key)
+- to_execution_address: 20 bytes (Ethereum address)
+- signature: 96 bytes (BLS signature)
+- Total: 172 bytes
+
+This approach ensures reliable parsing across all beacon chain forks and prevents the offset table errors that were occurring with deposits, BLS changes, and other fixed-size structures.
+
+### Common Parsing Errors and Solutions
+
+**Error**: `Invalid offset table for parse_deposit`
+**Cause**: Deposits treated as variable-size when they're fixed-size
+**Solution**: Add `'parse_deposit': 1240` to `fixed_size_parsers`
+
+**Error**: `Invalid offset table for parse_bls_to_execution_change`
+**Cause**: BLS changes treated as variable-size when they're fixed-size
+**Solution**: Add `'parse_bls_to_execution_change': 172` to `fixed_size_parsers`
+
+**Error**: `Invalid offset table for parse_voluntary_exit`  
+**Cause**: Voluntary exits treated as variable-size when they're fixed-size
+**Solution**: Add `'parse_voluntary_exit': 112` to `fixed_size_parsers`
+
+**Error**: Attestations parsing incorrectly
+**Cause**: Attestations are truly variable-size and need offset table parsing
+**Solution**: Keep attestations OUT of `fixed_size_parsers` - they use offsets correctly
+
+The key insight is that **BLS to execution changes are fixed-size structures** with exactly 172 bytes per item, not variable-size structures that use offset tables. This was causing the parser to misinterpret the first 8 bytes (validator_index) as an offset pointer, leading to only one item being parsed instead of all items in the list.
 
 ---
 

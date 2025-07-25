@@ -301,22 +301,32 @@ class BaseForkParser(ABC):
             return None
 
     def parse_bls_to_execution_change(self, data: bytes) -> Optional[Dict[str, Any]]:
-        """Parse a single BLS to execution change (Capella+)"""
+        """
+        Parse a single BLS to execution change (Capella+) - FIXED to handle proper structure
+        Expected: validator_index (8) + from_bls_pubkey (48) + to_execution_address (20) + signature (96) = 172 bytes
+        """
         try:
-            if len(data) < 172:  # 8 + 48 + 20 + 96 = 172 bytes minimum
+            if len(data) < 172:  # Must be exactly 172 bytes
+                print(f"BLS change data size {len(data)}, expected 172 bytes")
                 return None
             
             pos = 0
             
-            # Parse the message part
+            # Parse the message part (76 bytes total)
             validator_index = str(read_uint64_at(data, pos))
             pos += 8
+            
             from_bls_pubkey = "0x" + data[pos:pos + 48].hex()
             pos += 48
+            
             to_execution_address = "0x" + data[pos:pos + 20].hex()
             pos += 20
             
-            # Parse signature
+            # Parse signature (96 bytes)
+            if pos + 96 > len(data):
+                print(f"Not enough data for BLS signature: {len(data) - pos} bytes remaining, need 96")
+                return None
+                
             signature = "0x" + data[pos:pos + 96].hex()
             
             return {
@@ -329,6 +339,7 @@ class BaseForkParser(ABC):
             }
             
         except Exception as e:
+            print(f"Error parsing BLS to execution change: {e}")
             return None
     
     def parse_sync_aggregate(self, data: bytes) -> Dict[str, Any]:
@@ -412,7 +423,7 @@ class BaseForkParser(ABC):
     
     def parse_variable_field_data(self, body_data: bytes, all_offsets: List[int], 
                                  field_definitions: List[tuple]) -> Dict[str, Any]:
-        """Parse variable field data using offsets"""
+        """Parse variable field data using offsets - FIXED for better debugging"""
         result = {}
         
         for i, ((field_name, parser_func, *args), offset) in enumerate(zip(field_definitions, all_offsets)):
@@ -445,7 +456,7 @@ class BaseForkParser(ABC):
 
             field_data = body_data[offset:end]
             
-            try:
+            try:         
                 if parser_func == parse_list_of_items:
                     result[field_name] = parser_func(field_data, *args)
                 else:

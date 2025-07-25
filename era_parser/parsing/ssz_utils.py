@@ -15,7 +15,7 @@ def read_uint64_at(data: bytes, offset: int) -> int:
 
 def parse_list_of_items(data: bytes, item_parser_func: Callable, *args) -> List[Any]:
     """
-    Parse SSZ list with proper offset handling - FIXED for better deposit support
+    Parse SSZ list with proper offset handling - FIXED for better support of all item types
     
     Args:
         data: SSZ encoded list data
@@ -29,6 +29,9 @@ def parse_list_of_items(data: bytes, item_parser_func: Callable, *args) -> List[
     if not data:
         return items
 
+    # Get parser name for type-specific handling
+    parser_name = item_parser_func.__name__ if hasattr(item_parser_func, '__name__') else 'unknown'
+
     # Special handling for fixed-size items that don't use offset tables
     fixed_size_parsers = {
         'parse_withdrawal': 44,
@@ -38,9 +41,8 @@ def parse_list_of_items(data: bytes, item_parser_func: Callable, *args) -> List[
         'parse_kzg_commitment': 48,
         'parse_voluntary_exit': 112,
         'parse_deposit': 1240,
+        'parse_bls_to_execution_change': 172,  # BLS changes are FIXED SIZE!
     }
-    
-    parser_name = item_parser_func.__name__ if hasattr(item_parser_func, '__name__') else 'unknown'
     
     # FIXED: Handle deposits and other fixed-size items
     if parser_name in fixed_size_parsers:
@@ -72,7 +74,7 @@ def parse_list_of_items(data: bytes, item_parser_func: Callable, *args) -> List[
             items.append(parsed)
         return items
 
-    # For variable-size items, check the offset pattern
+    # For variable-size items (like BLS changes, attestations, attester slashings), use offset table
     if len(data) < 4:
         # Data too small for offset table, try parsing as single item
         parsed = item_parser_func(data, *args)
@@ -94,62 +96,63 @@ def parse_list_of_items(data: bytes, item_parser_func: Callable, *args) -> List[
     if first_offset == len(data):
         return items
     
-    # FIXED: Better validation for offset table
-    if first_offset < 4 or first_offset > len(data) or first_offset % 4 != 0:
-        # Invalid offset table - try parsing as single item or multiple fixed-size items
-        print(f"Invalid offset table for {parser_name}, first_offset={first_offset}, trying fallback parsing")
-        
-        # For deposits, try fixed-size parsing as fallback
-        if parser_name == 'parse_deposit':
-            print(f"Trying fixed-size parsing for deposits with data length {len(data)}")
-            # Recursive call will use the fixed-size logic above
-            return parse_list_of_items(data, item_parser_func, *args)
-        
-        # For voluntary exits, try fixed-size parsing as fallback
-        if parser_name == 'parse_voluntary_exit':
-            print(f"Trying fixed-size parsing for voluntary exits with data length {len(data)}")
-            # Recursive call will use the fixed-size logic above
-            return parse_list_of_items(data, item_parser_func, *args)
-        
-        # For other types, try parsing as single item
+    # FIXED: Better validation for offset table - must be aligned and reasonable
+    if first_offset % 4 != 0 or first_offset < 4:
+        print(f"Invalid offset alignment for {parser_name}, first_offset={first_offset}, trying fallback parsing")
+        # Try parsing as single item
         parsed = item_parser_func(data, *args)
         if parsed:
             items.append(parsed)
         return items
 
+    # FIXED: Calculate number of items more carefully
+    # The offset table size tells us how many items there are
     num_items = first_offset // 4
+    
     if num_items == 0:
         return items
     
-    # FIXED: Better bounds checking for offsets
+    # FIXED: Validate that we have enough data for all offsets
     if num_items * 4 > len(data):
-        print(f"Invalid number of items {num_items} for data length {len(data)}")
+        print(f"Not enough data for {num_items} offsets in {parser_name} (need {num_items * 4}, have {len(data)})")
         return items
     
+    # Read all offsets
     offsets = []
     for i in range(num_items):
         offset = read_uint32_at(data, i * 4)
         if offset > len(data):
-            print(f"Invalid offset {offset} at index {i} for data length {len(data)}")
+            print(f"Invalid offset {offset} at index {i} for data length {len(data)} in {parser_name}")
+            # Don't add invalid offsets, but continue with valid ones
             continue
         offsets.append(offset)
     
     if not offsets:
         return items
     
-    # Parse each item using the offset table
+    # FIXED: Parse each item using the offset table with proper bounds
     for i in range(len(offsets)):
         start = offsets[i]
-        end = offsets[i+1] if i + 1 < len(offsets) else len(data)
         
+        # Determine end position for this item
+        if i + 1 < len(offsets):
+            end = offsets[i + 1]
+        else:
+            end = len(data)
+        
+        # Validate bounds
         if start >= len(data) or end > len(data) or start >= end:
-            print(f"Invalid item bounds: start={start}, end={end}, data_length={len(data)}")
+            print(f"Invalid item bounds in {parser_name}: start={start}, end={end}, data_length={len(data)}")
             continue
             
         item_data = data[start:end]
-        parsed = item_parser_func(item_data, *args)
         
-        if parsed:
-            items.append(parsed)
+        try:
+            parsed = item_parser_func(item_data, *args)
+            if parsed:
+                items.append(parsed)
+        except Exception as e:
+            print(f"Error parsing item {i} in {parser_name}: {e}")
+            continue
             
     return items
