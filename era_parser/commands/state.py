@@ -1,9 +1,24 @@
-"""Era state management commands"""
-
+import os
 from typing import List
 
 from .base import BaseCommand
 from ..export.era_state_manager import EraStateManager
+
+def load_env_file(env_file_path: str = '.env'):
+    """Load environment variables from .env file"""
+    if os.path.exists(env_file_path):
+        print(f"📁 Loading environment from {env_file_path}")
+        with open(env_file_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    # Only set if not already in environment
+                    if key not in os.environ:
+                        os.environ[key] = value
+                        print(f"   ✅ Set {key}")
+    else:
+        print(f"   ℹ️  No .env file found at {env_file_path}")
 
 class StateCommand(BaseCommand):
     """Handler for era state management operations"""
@@ -27,9 +42,26 @@ class StateCommand(BaseCommand):
         else:
             print(f"❌ Unknown state command: {command_type}")
     
+    def _ensure_environment_loaded(self):
+        """Ensure environment variables are loaded before creating EraStateManager"""
+        # Check if ClickHouse variables are already set
+        if not os.getenv('CLICKHOUSE_HOST') or not os.getenv('CLICKHOUSE_PASSWORD'):
+            print("🔧 ClickHouse environment not detected, loading from .env file...")
+            load_env_file()
+            
+            # Check again after loading
+            if not os.getenv('CLICKHOUSE_HOST') or not os.getenv('CLICKHOUSE_PASSWORD'):
+                print("❌ ClickHouse environment variables not found!")
+                print("💡 Make sure to set CLICKHOUSE_HOST and CLICKHOUSE_PASSWORD in your .env file")
+                return False
+        return True
+    
     def _handle_era_status(self, args: List[str]) -> None:
         """Handle era status display"""
         if not self.validate_required_args(args, 1, "era-parser --era-status [network]"):
+            return
+        
+        if not self._ensure_environment_loaded():
             return
         
         network = args[0] if args[0] != 'all' else None
@@ -79,6 +111,9 @@ class StateCommand(BaseCommand):
         if not self.validate_required_args(args, 1, "era-parser --era-failed [network] [limit]"):
             return
         
+        if not self._ensure_environment_loaded():
+            return
+        
         network = args[0] if args[0] != 'all' else None
         limit = int(args[1]) if len(args) > 1 else 20
         
@@ -108,6 +143,9 @@ class StateCommand(BaseCommand):
     
     def _handle_era_cleanup(self, args: List[str]) -> None:
         """Handle era cleanup operations"""
+        if not self._ensure_environment_loaded():
+            return
+            
         timeout = int(args[0]) if args else 30
         
         try:
@@ -125,6 +163,9 @@ class StateCommand(BaseCommand):
     def _handle_era_check(self, args: List[str]) -> None:
         """Handle era status check for specific file"""
         if not self.validate_required_args(args, 1, "era-parser --era-check <era_file>"):
+            return
+        
+        if not self._ensure_environment_loaded():
             return
         
         era_file = args[0]
