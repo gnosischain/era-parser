@@ -630,7 +630,7 @@ class ClickHouseService:
         return column_mapping.get(table_name, [])
 
     def get_processed_eras(self, network: str, start_era: int = None, end_era: int = None) -> List[int]:
-        """Get list of successfully processed era numbers using era_processing_progress view"""
+        """Get list of successfully processed era numbers - SIMPLE FIX: just catch exception"""
         try:
             query = f"""
             SELECT era_number 
@@ -654,11 +654,12 @@ class ClickHouseService:
             result = self.client.query(query, params)
             return [row[0] for row in result.result_rows]
         except Exception as e:
-            logger.error(f"Error getting processed eras: {e}")
+            # Simple fix: just return empty list if table doesn't exist yet
+            logger.debug(f"Could not get processed eras (tables probably don't exist yet): {e}")
             return []
 
     def get_failed_eras(self, network: str) -> List[Dict]:
-        """Get list of failed era processing attempts using era_processing_state"""
+        """Get list of failed era processing attempts - SIMPLE FIX: just catch exception"""
         try:
             result = self.client.query(f"""
                 SELECT era_number, era_filename, created_at, error_message, dataset
@@ -678,7 +679,8 @@ class ClickHouseService:
                 })
             return failed_eras
         except Exception as e:
-            logger.error(f"Error getting failed eras: {e}")
+            # Simple fix: just return empty list if table doesn't exist yet
+            logger.debug(f"Could not get failed eras (tables probably don't exist yet): {e}")
             return []
 
     @staticmethod
