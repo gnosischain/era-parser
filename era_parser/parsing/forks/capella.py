@@ -1,5 +1,3 @@
-"""Capella fork parser - Only adds withdrawals and BLS changes to Bellatrix"""
-
 from typing import Dict, Any
 from ..ssz_utils import parse_list_of_items, read_uint32_at
 from .bellatrix import BellatrixParser
@@ -63,7 +61,7 @@ class CapellaParser(BellatrixParser):
         all_offsets = base_offsets + [execution_payload_offset, bls_changes_offset]
         all_field_definitions = self.get_base_field_definitions() + [
             ("execution_payload", self.parse_execution_payload, "capella"),
-            ("bls_to_execution_changes", parse_list_of_items, lambda d: None)
+            ("bls_to_execution_changes", parse_list_of_items, self.parse_bls_to_execution_change)
         ]
         
         # Parse variable fields

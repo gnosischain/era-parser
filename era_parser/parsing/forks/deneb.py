@@ -73,8 +73,8 @@ class DenebParser(CapellaParser):
         all_offsets = base_offsets + [execution_payload_offset, bls_changes_offset, blob_commitments_offset]
         all_field_definitions = self.get_base_field_definitions() + [
             ("execution_payload", self.parse_execution_payload, "deneb"),
-            ("bls_to_execution_changes", parse_list_of_items, lambda d: None),
-            ("blob_kzg_commitments", parse_list_of_items, self.parse_kzg_commitment)  # FIXED!
+            ("bls_to_execution_changes", parse_list_of_items, self.parse_bls_to_execution_change),
+            ("blob_kzg_commitments", parse_list_of_items, self.parse_kzg_commitment)
         ]
         
         # Parse variable fields

@@ -60,7 +60,7 @@ export CLICKHOUSE_PASSWORD=your-password
 # Process era range to ClickHouse
 era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse
 
-# Process with resume capability
+# Process with intelligent resume capability
 era-parser --remote gnosis 1082+ all-blocks --export clickhouse --resume
 
 # Download without processing
@@ -111,6 +111,7 @@ ERA_MAX_RETRIES=3
 - **🌍 Remote Era Processing**: Download and process from remote URLs
 - **🗄️ ClickHouse Integration**: Direct export with granular state tracking
 - **📈 Era State Management**: Track processing status per dataset
+- **🔄 Intelligent Resume**: Dataset-level granular recovery for robust processing
 - **🐳 Docker Support**: Containerized deployment
 - **⚡ High Performance**: Memory-efficient streaming processing
 
@@ -128,14 +129,13 @@ ERA_MAX_RETRIES=3
 
 ### Research and Analytics
 ```bash
-# Extract all validator attestations for analysis
+# Extract all validator data for analysis period
 era-parser --remote gnosis 1000-1100 attestations --export clickhouse
+era-parser --remote gnosis 1000-1100 deposits --export clickhouse
+era-parser --remote gnosis 1000-1100 withdrawals --export clickhouse
 
-# Get comprehensive block data with separate tables
-era-parser --remote mainnet 2500+ all-blocks --export clickhouse --resume
-
-# Export transaction data for MEV analysis
-era-parser --batch 'mainnet-*.era' transactions --export clickhouse
+# Continuous monitoring with intelligent resume
+era-parser --remote gnosis 2500+ all-blocks --export clickhouse --resume
 ```
 
 ### Data Export
@@ -161,6 +161,33 @@ era-parser --era-failed gnosis
 # Clean up stale processing entries
 era-parser --era-cleanup 30
 ```
+
+### Intelligent Resume Capability
+
+The `--resume` flag provides **dataset-level granular recovery** for robust large-scale processing:
+
+```bash
+# Initial processing - processes all datasets
+era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse
+
+# Network interruption or failure occurs...
+
+# Resume processes only incomplete/failed datasets
+era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse --resume
+```
+
+**Key Benefits:**
+- **Smart Recovery**: Only processes missing or failed datasets, not entire eras
+- **Network Resilience**: Survives connection interruptions and continues exactly where it left off
+- **Granular Tracking**: Tracks 13+ datasets per era independently (`blocks`, `transactions`, `attestations`, etc.)
+- **Parallel Safe**: Multiple workers can process different datasets simultaneously
+- **No Redundant Work**: Avoids reprocessing already-completed data
+
+**Use Cases:**
+- Large-scale historical data processing
+- Network-unreliable environments
+- Long-running batch jobs
+- Distributed processing workflows
 
 ## 🔍 Output Formats
 

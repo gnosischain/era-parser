@@ -251,15 +251,24 @@ class ClickHouseService:
             att_1_committee_index UInt64 DEFAULT 0,
             att_1_beacon_block_root String DEFAULT '',
             att_1_source_epoch UInt64 DEFAULT 0,
+            att_1_source_root String DEFAULT '',
             att_1_target_epoch UInt64 DEFAULT 0,
+            att_1_target_root String DEFAULT '',
             att_1_signature String DEFAULT '',
+            att_1_attesting_indices String DEFAULT '[]',
+            att_1_validator_count UInt32 DEFAULT 0,
             att_2_slot UInt64 DEFAULT 0,
             att_2_committee_index UInt64 DEFAULT 0,
             att_2_beacon_block_root String DEFAULT '',
             att_2_source_epoch UInt64 DEFAULT 0,
+            att_2_source_root String DEFAULT '',
             att_2_target_epoch UInt64 DEFAULT 0,
+            att_2_target_root String DEFAULT '',
             att_2_signature String DEFAULT '',
+            att_2_attesting_indices String DEFAULT '[]',
+            att_2_validator_count UInt32 DEFAULT 0,
             timestamp_utc DateTime DEFAULT toDateTime(0),
+            total_slashed_validators UInt32 DEFAULT 0,
             insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
         ) ENGINE = ReplacingMergeTree(insert_version)
         PARTITION BY toStartOfMonth(timestamp_utc)
@@ -604,10 +613,14 @@ class ClickHouseService:
                 'header_2_body_root', 'header_2_signature', 'timestamp_utc'
             ],
             'attester_slashings': [
-                'slot', 'slashing_index', 'att_1_slot', 'att_1_committee_index', 'att_1_beacon_block_root',
-                'att_1_source_epoch', 'att_1_target_epoch', 'att_1_signature', 'att_2_slot', 
-                'att_2_committee_index', 'att_2_beacon_block_root', 'att_2_source_epoch', 
-                'att_2_target_epoch', 'att_2_signature', 'timestamp_utc'
+                'slot', 'slashing_index', 
+                'att_1_slot', 'att_1_committee_index', 'att_1_beacon_block_root',
+                'att_1_source_epoch', 'att_1_source_root', 'att_1_target_epoch', 'att_1_target_root',
+                'att_1_signature', 'att_1_attesting_indices', 'att_1_validator_count',
+                'att_2_slot', 'att_2_committee_index', 'att_2_beacon_block_root', 
+                'att_2_source_epoch', 'att_2_source_root', 'att_2_target_epoch', 'att_2_target_root',
+                'att_2_signature', 'att_2_attesting_indices', 'att_2_validator_count',
+                'timestamp_utc', 'total_slashed_validators'
             ],
             'bls_changes': [
                 'slot', 'change_index', 'signature', 'validator_index', 'from_bls_pubkey', 

@@ -118,7 +118,7 @@ class ElectraParser(DenebParser):
                                      blob_commitments_offset, execution_requests_offset]
         all_field_definitions = self.get_base_field_definitions() + [
             ("execution_payload", self.parse_execution_payload, "deneb"),
-            ("bls_to_execution_changes", parse_list_of_items, lambda d: None),
+            ("bls_to_execution_changes", parse_list_of_items, self.parse_bls_to_execution_change),
             ("blob_kzg_commitments", parse_list_of_items, self.parse_kzg_commitment),
             ("execution_requests", self.parse_execution_requests)
         ]

@@ -1,5 +1,3 @@
-"""Refactored base fork parser with common functionality to eliminate duplication"""
-
 import json
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Tuple
@@ -98,6 +96,9 @@ class BaseForkParser(ABC):
     def parse_attestation(self, data: bytes) -> Optional[Dict[str, Any]]:
         """Parse a single attestation"""
         try:
+            if len(data) < 228:  # Minimum size
+                return None
+                
             bits_offset = read_uint32_at(data, 0)
             att_data_raw = data[4:132]
             signature = data[132:228]
@@ -122,6 +123,212 @@ class BaseForkParser(ABC):
                 "signature": "0x" + signature.hex()
             }
         except Exception:
+            return None
+
+    def parse_indexed_attestation(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """Parse an IndexedAttestation (used in AttesterSlashing)"""
+        try:
+            if len(data) < 232:  # Minimum size: 4 (offset) + 128 (AttestationData) + 96 (signature) + 4 (min indices)
+                return None
+            
+            # Read offset for attesting_indices
+            indices_offset = read_uint32_at(data, 0)
+            
+            if indices_offset >= len(data):
+                return None
+            
+            # Parse AttestationData (fixed 128 bytes after offset)
+            att_data_start = 4  # After the offset
+            att_data_raw = data[att_data_start:att_data_start + 128]
+            
+            attestation_data = {
+                "slot": str(read_uint64_at(att_data_raw, 0)), 
+                "index": str(read_uint64_at(att_data_raw, 8)),
+                "beacon_block_root": "0x" + att_data_raw[16:48].hex(),
+                "source": {
+                    "epoch": str(read_uint64_at(att_data_raw, 48)), 
+                    "root": "0x" + att_data_raw[56:88].hex()
+                },
+                "target": {
+                    "epoch": str(read_uint64_at(att_data_raw, 88)), 
+                    "root": "0x" + att_data_raw[96:128].hex()
+                }
+            }
+            
+            # Parse signature (96 bytes after AttestationData)
+            signature_start = att_data_start + 128
+            signature = "0x" + data[signature_start:signature_start + 96].hex()
+            
+            # Parse attesting_indices (variable length list at offset)
+            indices_data = data[indices_offset:]
+            attesting_indices = []
+            
+            # Parse the list of validator indices as consecutive uint64 values
+            if len(indices_data) >= 8:
+                for i in range(0, len(indices_data) - 7, 8):
+                    index = read_uint64_at(indices_data, i)
+                    attesting_indices.append(str(index))
+            
+            return {
+                "attesting_indices": attesting_indices,
+                "data": attestation_data,
+                "signature": signature
+            }
+            
+        except Exception as e:
+            return None
+
+    def parse_proposer_slashing(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """Parse a single proposer slashing"""
+        try:
+            if len(data) < 416:  # 2 * (8+8+32+32+32+96) = 2 * 208 = 416 bytes
+                return None
+            
+            pos = 0
+            
+            # Parse signed_header_1
+            header_1_message = {
+                "slot": str(read_uint64_at(data, pos)),
+                "proposer_index": str(read_uint64_at(data, pos + 8)),
+                "parent_root": "0x" + data[pos + 16:pos + 48].hex(),
+                "state_root": "0x" + data[pos + 48:pos + 80].hex(),
+                "body_root": "0x" + data[pos + 80:pos + 112].hex()
+            }
+            pos += 112
+            
+            header_1_signature = "0x" + data[pos:pos + 96].hex()
+            pos += 96
+            
+            signed_header_1 = {
+                "message": header_1_message,
+                "signature": header_1_signature
+            }
+            
+            # Parse signed_header_2
+            header_2_message = {
+                "slot": str(read_uint64_at(data, pos)),
+                "proposer_index": str(read_uint64_at(data, pos + 8)),
+                "parent_root": "0x" + data[pos + 16:pos + 48].hex(),
+                "state_root": "0x" + data[pos + 48:pos + 80].hex(),
+                "body_root": "0x" + data[pos + 80:pos + 112].hex()
+            }
+            pos += 112
+            
+            header_2_signature = "0x" + data[pos:pos + 96].hex()
+            pos += 96
+            
+            signed_header_2 = {
+                "message": header_2_message,
+                "signature": header_2_signature
+            }
+            
+            return {
+                "signed_header_1": signed_header_1,
+                "signed_header_2": signed_header_2
+            }
+            
+        except Exception as e:
+            return None
+
+    def parse_attester_slashing(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """Parse a single attester slashing - FIXED to use IndexedAttestation"""
+        try:
+            if len(data) < 8:  # Need at least 2 offsets
+                return None
+            
+            # Attester slashings have two IndexedAttestations, so we need to parse offsets
+            attestation_1_offset = read_uint32_at(data, 0)
+            attestation_2_offset = read_uint32_at(data, 4)
+            
+            if attestation_1_offset >= len(data) or attestation_2_offset >= len(data):
+                return None
+            
+            # Parse attestation_1 (IndexedAttestation)
+            attestation_1_end = attestation_2_offset
+            attestation_1_data = data[attestation_1_offset:attestation_1_end]
+            attestation_1 = self.parse_indexed_attestation(attestation_1_data)
+            
+            # Parse attestation_2 (IndexedAttestation)
+            attestation_2_data = data[attestation_2_offset:]
+            attestation_2 = self.parse_indexed_attestation(attestation_2_data)
+            
+            if not attestation_1 or not attestation_2:
+                return None
+            
+            return {
+                "attestation_1": attestation_1,
+                "attestation_2": attestation_2
+            }
+            
+        except Exception as e:
+            return None
+
+    def parse_voluntary_exit(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """
+        Parse a single voluntary exit - FIXED version for proper parsing
+        Expected structure: 8 bytes epoch + 8 bytes validator_index + 96 bytes signature = 112 bytes total
+        """
+        try:
+            if len(data) < 112:  # Must be exactly 112 bytes
+                print(f"Voluntary exit data too small: {len(data)} bytes, expected 112")
+                return None
+            
+            pos = 0
+            
+            # Parse the message part (16 bytes total)
+            epoch = str(read_uint64_at(data, pos))
+            pos += 8
+            validator_index = str(read_uint64_at(data, pos))
+            pos += 8
+            
+            # Parse signature (96 bytes)
+            if pos + 96 > len(data):
+                print(f"Not enough data for signature: {len(data) - pos} bytes remaining, need 96")
+                return None
+                
+            signature = "0x" + data[pos:pos + 96].hex()
+            
+            return {
+                "message": {
+                    "epoch": epoch,
+                    "validator_index": validator_index
+                },
+                "signature": signature
+            }
+            
+        except Exception as e:
+            print(f"Error parsing voluntary exit: {e}")
+            return None
+
+    def parse_bls_to_execution_change(self, data: bytes) -> Optional[Dict[str, Any]]:
+        """Parse a single BLS to execution change (Capella+)"""
+        try:
+            if len(data) < 172:  # 8 + 48 + 20 + 96 = 172 bytes minimum
+                return None
+            
+            pos = 0
+            
+            # Parse the message part
+            validator_index = str(read_uint64_at(data, pos))
+            pos += 8
+            from_bls_pubkey = "0x" + data[pos:pos + 48].hex()
+            pos += 48
+            to_execution_address = "0x" + data[pos:pos + 20].hex()
+            pos += 20
+            
+            # Parse signature
+            signature = "0x" + data[pos:pos + 96].hex()
+            
+            return {
+                "message": {
+                    "validator_index": validator_index,
+                    "from_bls_pubkey": from_bls_pubkey,
+                    "to_execution_address": to_execution_address
+                },
+                "signature": signature
+            }
+            
+        except Exception as e:
             return None
     
     def parse_sync_aggregate(self, data: bytes) -> Dict[str, Any]:
@@ -215,6 +422,17 @@ class BaseForkParser(ABC):
             if next_offsets:
                 end = min(next_offsets)
             
+            # FIXED: Check if this field is empty (same offset as next field)
+            if i + 1 < len(all_offsets) and offset == all_offsets[i + 1]:
+                # This field is empty - same offset as next field
+                if field_name in ["sync_aggregate", "execution_payload"]:
+                    result[field_name] = {}
+                elif field_name == "execution_requests":
+                    result[field_name] = {"deposits": [], "withdrawals": [], "consolidations": []}
+                else:
+                    result[field_name] = []
+                continue
+            
             if offset >= len(body_data) or end <= offset:
                 # Handle missing/empty fields
                 if field_name in ["sync_aggregate", "execution_payload"]:
@@ -232,7 +450,9 @@ class BaseForkParser(ABC):
                     result[field_name] = parser_func(field_data, *args)
                 else:
                     result[field_name] = parser_func(field_data, *args)
-            except Exception:
+                    
+            except Exception as e:
+                print(f"Error parsing field {field_name}: {e}")
                 # Set default values on parse error
                 if field_name in ["sync_aggregate", "execution_payload"]:
                     result[field_name] = {}
@@ -259,11 +479,11 @@ class BaseForkParser(ABC):
     def get_base_field_definitions(self) -> List[tuple]:
         """Get the 5 base variable field definitions common to all forks"""
         return [
-            ("proposer_slashings", parse_list_of_items, lambda d: None),
-            ("attester_slashings", parse_list_of_items, lambda d: None),
+            ("proposer_slashings", parse_list_of_items, self.parse_proposer_slashing),
+            ("attester_slashings", parse_list_of_items, self.parse_attester_slashing),
             ("attestations", parse_list_of_items, self.parse_attestation),
             ("deposits", parse_list_of_items, self.parse_deposit),
-            ("voluntary_exits", parse_list_of_items, lambda d: None)
+            ("voluntary_exits", parse_list_of_items, self.parse_voluntary_exit)
         ]
     
     @abstractmethod

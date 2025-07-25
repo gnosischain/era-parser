@@ -303,6 +303,13 @@ class EraProcessor:
                 attestation_1 = slashing.get("attestation_1", {})
                 attestation_2 = slashing.get("attestation_2", {})
                 
+                # Get attesting indices arrays
+                att_1_indices = attestation_1.get("attesting_indices", [])
+                att_2_indices = attestation_2.get("attesting_indices", [])
+                
+                # Calculate total unique slashed validators
+                all_indices = set(att_1_indices + att_2_indices)
+                
                 all_data['attester_slashings'].append({
                     "slot": slot,
                     "slashing_index": slash_idx,
@@ -310,15 +317,24 @@ class EraProcessor:
                     "att_1_committee_index": attestation_1.get("data", {}).get("index"),
                     "att_1_beacon_block_root": attestation_1.get("data", {}).get("beacon_block_root"),
                     "att_1_source_epoch": attestation_1.get("data", {}).get("source", {}).get("epoch"),
+                    "att_1_source_root": attestation_1.get("data", {}).get("source", {}).get("root"),
                     "att_1_target_epoch": attestation_1.get("data", {}).get("target", {}).get("epoch"),
+                    "att_1_target_root": attestation_1.get("data", {}).get("target", {}).get("root"),
                     "att_1_signature": attestation_1.get("signature"),
+                    "att_1_attesting_indices": json.dumps(att_1_indices),
+                    "att_1_validator_count": len(att_1_indices),
                     "att_2_slot": attestation_2.get("data", {}).get("slot"),
                     "att_2_committee_index": attestation_2.get("data", {}).get("index"),
                     "att_2_beacon_block_root": attestation_2.get("data", {}).get("beacon_block_root"),
                     "att_2_source_epoch": attestation_2.get("data", {}).get("source", {}).get("epoch"),
+                    "att_2_source_root": attestation_2.get("data", {}).get("source", {}).get("root"),
                     "att_2_target_epoch": attestation_2.get("data", {}).get("target", {}).get("epoch"),
+                    "att_2_target_root": attestation_2.get("data", {}).get("target", {}).get("root"),
                     "att_2_signature": attestation_2.get("signature"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                    "att_2_attesting_indices": json.dumps(att_2_indices),
+                    "att_2_validator_count": len(att_2_indices),
+                    "timestamp_utc": timestamp_utc,
+                    "total_slashed_validators": len(all_indices),
                 })
             
             # BLS Changes - FULL data with SINGLE timestamp (Capella+)
