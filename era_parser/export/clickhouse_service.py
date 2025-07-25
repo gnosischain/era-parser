@@ -1,4 +1,4 @@
-"""Optimized ClickHouse service with time-based partitioning and single timestamp"""
+"""Optimized ClickHouse service with time-based partitioning and single timestamp - SIMPLIFIED BATCHING"""
 
 import os
 import logging
@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 
 class ClickHouseService:
     """Optimized service for beacon chain data with time-based partitioning and single timestamp"""
+
+    # Single global batch size for all operations
+    GLOBAL_BATCH_SIZE = 5000
 
     def __init__(self):
         """Initialize ClickHouse service from environment variables"""
@@ -327,7 +330,7 @@ class ClickHouseService:
         """)
 
     def load_dataframe_to_table(self, df: pd.DataFrame, table_name: str) -> int:
-        """Optimized bulk loading with ClickHouse Cloud reliability"""
+        """Optimized bulk loading with single global batch size"""
         try:
             if df.empty:
                 logger.warning(f"No data in DataFrame for {table_name}")
@@ -336,7 +339,6 @@ class ClickHouseService:
             # Get expected columns for this table
             expected_columns = self._get_table_columns(table_name)
             
-            # OPTIMIZATION 1: Skip DataFrame alignment and prepare data directly
             # Convert to list of lists format that ClickHouse client expects
             bulk_data = self._prepare_bulk_data(df, expected_columns)
             
@@ -344,18 +346,14 @@ class ClickHouseService:
                 logger.warning(f"No valid data prepared for {table_name}")
                 return 0
 
-            # OPTIMIZATION 2: Use adaptive batch sizes based on data volume and table type
             total_records = len(bulk_data)
             
-            # Adaptive thresholds for ClickHouse Cloud
-            if table_name == 'attestations' and total_records > 10000:
-                # Attestations are complex and prone to timeouts
-                return self._streaming_bulk_insert(bulk_data, table_name, expected_columns)
-            elif total_records > 20000:
-                # Large datasets use streaming with smaller batches
+            # SIMPLIFIED: Use global batch size for ALL tables - no special cases!
+            if total_records > self.GLOBAL_BATCH_SIZE:
+                # Use streaming for large datasets
                 return self._streaming_bulk_insert(bulk_data, table_name, expected_columns)
             else:
-                # Small to medium datasets: direct bulk insert with retry
+                # Direct insert for small datasets with retry
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
@@ -405,7 +403,7 @@ class ClickHouseService:
             'transactions_count', 'withdrawals_count'
         }
         
-        # SIMPLIFIED: Only timestamp_utc is a datetime column
+        # Only timestamp_utc is a datetime column
         datetime_columns = {'timestamp_utc'}
         
         # Pre-convert DataFrame to dict for faster row access
@@ -516,21 +514,13 @@ class ClickHouseService:
             return datetime(1970, 1, 1)
 
     def _streaming_bulk_insert(self, bulk_data: List[List], table_name: str, expected_columns: List[str]) -> int:
-        """Handle large datasets with smaller, more reliable batch sizes for ClickHouse Cloud"""
-        # OPTIMIZATION: Use smaller batch sizes for ClickHouse Cloud reliability
-        if table_name == 'attestations':
-            batch_size = 5000  # Smaller batches for attestations which are often large
-        elif table_name in ['transactions', 'withdrawals']:
-            batch_size = 10000  # Medium batches for transaction data
-        else:
-            batch_size = 20000  # Larger batches for smaller datasets
-            
+        """SIMPLIFIED: Handle large datasets with single global batch size"""
         total_inserted = 0
         
-        logger.info(f"Cloud-optimized streaming insert {len(bulk_data)} records into {table_name} with batch size {batch_size}")
+        logger.info(f"Streaming insert {len(bulk_data)} records into {table_name} with batch size {self.GLOBAL_BATCH_SIZE}")
         
-        for start_idx in range(0, len(bulk_data), batch_size):
-            batch = bulk_data[start_idx:start_idx + batch_size]
+        for start_idx in range(0, len(bulk_data), self.GLOBAL_BATCH_SIZE):
+            batch = bulk_data[start_idx:start_idx + self.GLOBAL_BATCH_SIZE]
             
             # Retry logic for cloud reliability
             max_retries = 3
@@ -542,7 +532,7 @@ class ClickHouseService:
                     break  # Success, exit retry loop
                     
                 except Exception as e:
-                    logger.warning(f"Attempt {attempt + 1}/{max_retries} failed for {table_name} batch {start_idx//batch_size + 1}: {e}")
+                    logger.warning(f"Attempt {attempt + 1}/{max_retries} failed for {table_name} batch {start_idx//self.GLOBAL_BATCH_SIZE + 1}: {e}")
                     
                     if attempt < max_retries - 1:
                         # Wait before retry and try to reconnect
@@ -557,11 +547,11 @@ class ClickHouseService:
                             self.client = self._connect()
                     else:
                         # Final attempt failed
-                        logger.error(f"All {max_retries} attempts failed for {table_name} batch {start_idx//batch_size + 1}")
+                        logger.error(f"All {max_retries} attempts failed for {table_name} batch {start_idx//self.GLOBAL_BATCH_SIZE + 1}")
                         raise
             
             # Progress logging for large datasets
-            if len(bulk_data) > 50000 and (start_idx // batch_size) % 10 == 0:  # Every 10 batches for large datasets
+            if len(bulk_data) > 50000 and (start_idx // self.GLOBAL_BATCH_SIZE) % 10 == 0:  # Every 10 batches for large datasets
                 progress = (start_idx + len(batch)) / len(bulk_data) * 100
                 logger.info(f"Progress: {progress:.1f}% ({total_inserted:,} records)")
         
@@ -667,7 +657,7 @@ class ClickHouseService:
             result = self.client.query(query, params)
             return [row[0] for row in result.result_rows]
         except Exception as e:
-            # Simple fix: just return empty list if table doesn't exist yet
+            # just return empty list if table doesn't exist yet
             logger.debug(f"Could not get processed eras (tables probably don't exist yet): {e}")
             return []
 
@@ -692,7 +682,7 @@ class ClickHouseService:
                 })
             return failed_eras
         except Exception as e:
-            # Simple fix: just return empty list if table doesn't exist yet
+            # just return empty list if table doesn't exist yet
             logger.debug(f"Could not get failed eras (tables probably don't exist yet): {e}")
             return []
 
