@@ -29,8 +29,23 @@ def parse_list_of_items(data: bytes, item_parser_func: Callable, *args) -> List[
     if not data:
         return items
 
-    # Get parser name for type-specific handling
-    parser_name = item_parser_func.__name__ if hasattr(item_parser_func, '__name__') else 'unknown'
+    # IMPROVED: Better parser name detection for type-specific handling
+    parser_name = 'unknown'
+    if hasattr(item_parser_func, '__name__'):
+        parser_name = item_parser_func.__name__
+    elif hasattr(item_parser_func, '__qualname__'):
+        # Handle method names like 'BaseForkParser.parse_bls_to_execution_change'
+        parser_name = item_parser_func.__qualname__.split('.')[-1]
+    elif hasattr(item_parser_func, 'func'):
+        # Handle partial functions
+        parser_name = getattr(item_parser_func.func, '__name__', 'unknown')
+    
+    # ADDITIONAL: Check if it's a method and get the method name
+    if parser_name == 'unknown' and hasattr(item_parser_func, '__self__'):
+        # This is a bound method, try to get the method name
+        method_name = getattr(item_parser_func, '__func__', None)
+        if method_name and hasattr(method_name, '__name__'):
+            parser_name = method_name.__name__
 
     # Special handling for fixed-size items that don't use offset tables
     fixed_size_parsers = {
@@ -74,7 +89,7 @@ def parse_list_of_items(data: bytes, item_parser_func: Callable, *args) -> List[
             items.append(parsed)
         return items
 
-    # For variable-size items (like BLS changes, attestations, attester slashings), use offset table
+    # For variable-size items (like attestations, attester slashings), use offset table
     if len(data) < 4:
         # Data too small for offset table, try parsing as single item
         parsed = item_parser_func(data, *args)
@@ -98,7 +113,15 @@ def parse_list_of_items(data: bytes, item_parser_func: Callable, *args) -> List[
     
     # FIXED: Better validation for offset table - must be aligned and reasonable
     if first_offset % 4 != 0 or first_offset < 4:
-        print(f"Invalid offset alignment for {parser_name}, first_offset={first_offset}, trying fallback parsing")
+        # Only show warnings for unexpected cases, not for known variable-length parsers
+        variable_length_parsers = {
+            'parse_transaction_hash', 'parse_transaction_data', 'parse_hex_data',
+            'parse_attestation', 'parse_attester_slashing', 'parse_indexed_attestation'
+        }
+        
+        if parser_name not in variable_length_parsers:
+            print(f"Invalid offset alignment for {parser_name}, first_offset={first_offset}, trying fallback parsing")
+        
         # Try parsing as single item
         parsed = item_parser_func(data, *args)
         if parsed:

@@ -254,11 +254,11 @@ The parser automatically detects the network from the filename and determines th
 
 ## Compatibility Matrix
 
-| Network | Phase 0 | Altair | Bellatrix | Capella | Deneb | Electra |
-|---------|---------|--------|-----------|---------|-------|---------|
-| Mainnet | ✅ | ✅ | ✅ | ✅ | ✅ | ⏳ |
-| Gnosis | ✅ | ✅ | ✅ | ✅ | ✅ | ⏳ |
-| Sepolia | ✅ | ✅ | ✅ | ✅ | ✅ | ⏳ |
+| Network | Phase 0 | Altair | Bellatrix | Capella | Deneb | Electra | Fulu |
+|---------|---------|--------|-----------|---------|-------|---------|------|
+| Mainnet | ✅ | ✅ | ✅ | ✅ | ✅ |  ✅ |⏳ |
+| Gnosis | ✅ | ✅ | ✅ | ✅ | ✅ |  ✅ |⏳ |
+| Sepolia | ✅ | ✅ | ✅ | ✅ | ✅ |  ✅ |⏳ |
 
 **Legend**: ✅ Supported, ⏳ Future/Planned
 

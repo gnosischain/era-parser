@@ -490,50 +490,6 @@ else:
     print("CLI Success:", result.stdout)
 ```
 
-## Contributing Guidelines
-
-### 1. Before Submitting PRs
-
-- [ ] All tests pass
-- [ ] Code follows style guidelines
-- [ ] New features include tests
-- [ ] Documentation is updated
-- [ ] No breaking changes to public API
-
-### 2. PR Description Template
-
-```markdown
-## Description
-Brief description of changes
-
-## Type of Change
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Breaking change
-- [ ] Documentation update
-
-## Testing
-- [ ] Existing tests pass
-- [ ] New tests added
-- [ ] Manual testing completed
-
-## Checklist
-- [ ] Code follows style guidelines
-- [ ] Self-review completed
-- [ ] Documentation updated
-```
-
-### 3. Commit Message Format
-
-```
-type(scope): description
-
-Examples:
-feat(parser): add support for Fulu fork
-fix(export): handle empty block lists in CSV export
-docs(readme): update installation instructions
-```
-
 ## Release Process
 
 ### 1. Version Bumping

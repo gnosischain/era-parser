@@ -270,7 +270,6 @@ class BaseForkParser(ABC):
         """
         try:
             if len(data) < 112:  # Must be exactly 112 bytes
-                print(f"Voluntary exit data too small: {len(data)} bytes, expected 112")
                 return None
             
             pos = 0
@@ -283,7 +282,6 @@ class BaseForkParser(ABC):
             
             # Parse signature (96 bytes)
             if pos + 96 > len(data):
-                print(f"Not enough data for signature: {len(data) - pos} bytes remaining, need 96")
                 return None
                 
             signature = "0x" + data[pos:pos + 96].hex()
@@ -297,7 +295,6 @@ class BaseForkParser(ABC):
             }
             
         except Exception as e:
-            print(f"Error parsing voluntary exit: {e}")
             return None
 
     def parse_bls_to_execution_change(self, data: bytes) -> Optional[Dict[str, Any]]:
@@ -307,7 +304,6 @@ class BaseForkParser(ABC):
         """
         try:
             if len(data) < 172:  # Must be exactly 172 bytes
-                print(f"BLS change data size {len(data)}, expected 172 bytes")
                 return None
             
             pos = 0
@@ -324,7 +320,6 @@ class BaseForkParser(ABC):
             
             # Parse signature (96 bytes)
             if pos + 96 > len(data):
-                print(f"Not enough data for BLS signature: {len(data) - pos} bytes remaining, need 96")
                 return None
                 
             signature = "0x" + data[pos:pos + 96].hex()
@@ -339,7 +334,6 @@ class BaseForkParser(ABC):
             }
             
         except Exception as e:
-            print(f"Error parsing BLS to execution change: {e}")
             return None
     
     def parse_sync_aggregate(self, data: bytes) -> Dict[str, Any]:
@@ -395,6 +389,10 @@ class BaseForkParser(ABC):
         
         return result, pos, offsets
     
+    def parse_transaction_data(self, data: bytes) -> str:
+        """Parse complete transaction data to hex string"""
+        return "0x" + data.hex()
+    
     def parse_execution_payload_variable_fields(self, data: bytes, offsets: Dict[str, int], 
                                               variable_fields: List[str]) -> Dict[str, Any]:
         """Parse variable fields in execution payload"""
@@ -415,7 +413,7 @@ class BaseForkParser(ABC):
             if field_name == "extra_data": 
                 result["extra_data"] = "0x" + field_data.hex()
             elif field_name == "transactions": 
-                result["transactions"] = parse_list_of_items(field_data, lambda d: "0x" + d.hex())
+                result["transactions"] = parse_list_of_items(field_data, self.parse_transaction_data)
             elif field_name == "withdrawals": 
                 result["withdrawals"] = parse_list_of_items(field_data, self.parse_withdrawal)
         

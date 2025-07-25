@@ -101,7 +101,7 @@ class EraProcessor:
         return blocks
     
     def extract_all_data(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Extract ALL data from blocks with SIMPLIFIED single timestamp approach"""
+        """Extract ALL data from blocks"""
         block_records = self.era_reader.get_block_records()
         
         # Initialize all possible data types
@@ -123,7 +123,6 @@ class EraProcessor:
         
         successful = 0
         
-        print("🌍 FULL DATA EXTRACTION - SIMPLIFIED single timestamp approach...")
         
         for i, (slot, compressed_data) in enumerate(block_records):
             if (i + 1) % 100 == 0:
@@ -405,7 +404,7 @@ class EraProcessor:
                     "timestamp_utc": timestamp_utc,  # SINGLE timestamp
                 })
         
-        print(f"✅ Successfully processed {successful} blocks with SIMPLIFIED single timestamp extraction")
+        print(f"✅ Successfully processed {successful} blocks")
         return all_data
     
     def extract_specific_data(self, data_type: str) -> List[Dict[str, Any]]:
