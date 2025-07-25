@@ -37,6 +37,11 @@ def print_help():
     print("  era-parser --remote-progress <network>                # Show remote progress")
     print("  era-parser --remote-clear <network>                   # Clear remote progress")
     print("")
+    print("MIGRATION COMMANDS:")
+    print("  era-parser --migrate status                           # Show migration status")
+    print("  era-parser --migrate run [version]                    # Run migrations")
+    print("  era-parser --migrate list                             # List available migrations")
+    print("")
     print("ERA RANGE FORMATS:")
     print("  1082        # Single era")
     print("  1082-1100   # Era range (inclusive)")
@@ -48,6 +53,7 @@ def print_help():
     print("  - Parquet with --separate creates one file per data type")
     print("  - All nested data is fully extracted and preserved")
     print("  - SIMPLIFIED: Only single timestamp_utc per table for monthly partitioning")
+    print("  - Use --migrate commands to manage ClickHouse schema migrations")
 
 
 def main():
@@ -79,6 +85,11 @@ def main():
             from .commands.remote import RemoteCommand
             command = RemoteCommand()
             command.execute(sys.argv[1:])  # Include the command flag
+            
+        elif first_arg == "--migrate":
+            from .commands.migrate import MigrateCommand
+            command = MigrateCommand()
+            command.execute(sys.argv[2:])  # Pass args without --migrate
             
         elif first_arg.startswith('--'):
             print(f"❌ Unknown command: {first_arg}")

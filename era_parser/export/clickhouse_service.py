@@ -1,4 +1,4 @@
-"""Optimized ClickHouse service with time-based partitioning and single timestamp - SIMPLIFIED BATCHING"""
+"""Optimized ClickHouse service with migration support and single timestamp - SIMPLIFIED BATCHING"""
 
 import os
 import logging
@@ -8,10 +8,12 @@ from datetime import datetime
 import pandas as pd
 import clickhouse_connect
 
+from .migrations import MigrationManager
+
 logger = logging.getLogger(__name__)
 
 class ClickHouseService:
-    """Optimized service for beacon chain data with time-based partitioning and single timestamp"""
+    """Optimized service for beacon chain data with migration support and time-based partitioning"""
 
     # Single global batch size for all operations
     GLOBAL_BATCH_SIZE = 5000
@@ -29,7 +31,7 @@ class ClickHouseService:
             raise ValueError("CLICKHOUSE_HOST and CLICKHOUSE_PASSWORD must be set")
 
         self.client = self._connect()
-        self._ensure_tables()
+        self._ensure_schema()
 
     def _connect(self):
         """Connect to ClickHouse with optimized settings for ClickHouse Cloud"""
@@ -67,267 +69,50 @@ class ClickHouseService:
             logger.error(f"Failed to connect to ClickHouse: {e}")
             raise
 
-    def _ensure_tables(self):
-        """Create properly normalized tables with time-based partitioning and SINGLE timestamp"""
+    def _ensure_schema(self):
+        """Ensure database schema is up to date using migrations"""
+        try:
+            # Initialize migration manager
+            migration_manager = MigrationManager(self.client, self.database)
+            
+            # Run all pending migrations
+            success = migration_manager.run_migrations()
+            
+            if success:
+                # Get migration status for logging
+                status = migration_manager.get_migration_status()
+                logger.info(f"Schema migrations completed: {status['applied_count']} applied, {status['pending_count']} pending")
+            else:
+                logger.warning("Some migrations failed, but continuing with existing schema")
+                
+        except Exception as e:
+            logger.warning(f"Migration system failed, no fallback for ClickHouseService: {e}")
+            # Note: No fallback here since era_state_manager.py handles its own fallback
 
-        # Blocks table - ONLY beacon chain block data with single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.blocks (
-            slot UInt64,
-            proposer_index UInt64 DEFAULT 0,
-            parent_root String DEFAULT '',
-            state_root String DEFAULT '',
-            signature String DEFAULT '',
-            version String DEFAULT '',
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            randao_reveal String DEFAULT '',
-            graffiti String DEFAULT '',
-            eth1_deposit_root String DEFAULT '',
-            eth1_deposit_count UInt64 DEFAULT 0,
-            eth1_block_hash String DEFAULT '',
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, proposer_index)
-        """)
+    def get_migration_status(self) -> Dict[str, Any]:
+        """Get current migration status"""
+        try:
+            migration_manager = MigrationManager(self.client, self.database)
+            return migration_manager.get_migration_status()
+        except Exception as e:
+            logger.error(f"Failed to get migration status: {e}")
+            return {
+                'applied_count': 0,
+                'available_count': 0,
+                'pending_count': 0,
+                'last_applied': None,
+                'pending_versions': [],
+                'error': str(e)
+            }
 
-        # Sync aggregates table - single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.sync_aggregates (
-            slot UInt64,
-            sync_committee_bits String DEFAULT '',
-            sync_committee_signature String DEFAULT '',
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            participating_validators UInt32 DEFAULT 0,
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot)
-        """)
-
-        # Execution payloads table - SINGLE timestamp (removed duplicate timestamp column)
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.execution_payloads (
-            slot UInt64,
-            parent_hash String DEFAULT '',
-            fee_recipient String DEFAULT '',
-            state_root String DEFAULT '',
-            receipts_root String DEFAULT '',
-            logs_bloom String DEFAULT '',
-            prev_randao String DEFAULT '',
-            block_number UInt64 DEFAULT 0,
-            gas_limit UInt64 DEFAULT 0,
-            gas_used UInt64 DEFAULT 0,
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            base_fee_per_gas String DEFAULT '',
-            block_hash String DEFAULT '',
-            blob_gas_used UInt64 DEFAULT 0,
-            excess_blob_gas UInt64 DEFAULT 0,
-            extra_data String DEFAULT '',
-            transactions_count UInt64 DEFAULT 0,
-            withdrawals_count UInt64 DEFAULT 0,
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, block_number)
-        """)
-
-        # Transactions table - single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.transactions (
-            slot UInt64,
-            block_number UInt64 DEFAULT 0,
-            block_hash String DEFAULT '',
-            transaction_index UInt64,
-            transaction_hash String,
-            fee_recipient String DEFAULT '',
-            gas_limit UInt64 DEFAULT 0,
-            gas_used UInt64 DEFAULT 0,
-            base_fee_per_gas String DEFAULT '',
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, transaction_index, transaction_hash)
-        """)
-
-        # Withdrawals table - single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.withdrawals (
-            slot UInt64,
-            block_number UInt64 DEFAULT 0,
-            block_hash String DEFAULT '',
-            withdrawal_index UInt64,
-            validator_index UInt64,
-            address String,
-            amount UInt64,
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, withdrawal_index, validator_index)
-        """)
-
-        # Attestations table - single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.attestations (
-            slot UInt64,
-            attestation_index UInt64,
-            aggregation_bits String DEFAULT '',
-            signature String DEFAULT '',
-            attestation_slot UInt64 DEFAULT 0,
-            committee_index UInt64 DEFAULT 0,
-            beacon_block_root String DEFAULT '',
-            source_epoch UInt64 DEFAULT 0,
-            source_root String DEFAULT '',
-            target_epoch UInt64 DEFAULT 0,
-            target_root String DEFAULT '',
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, attestation_index, committee_index)
-        """)
-
-        # Deposits table - single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.deposits (
-            slot UInt64,
-            deposit_index UInt64,
-            pubkey String DEFAULT '',
-            withdrawal_credentials String DEFAULT '',
-            amount UInt64 DEFAULT 0,
-            signature String DEFAULT '',
-            proof String DEFAULT '[]',  -- JSON array instead of 33 individual columns
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, deposit_index, pubkey)
-        """)
-
-        # Voluntary exits table - single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.voluntary_exits (
-            slot UInt64,
-            exit_index UInt64,
-            signature String DEFAULT '',
-            epoch UInt64 DEFAULT 0,
-            validator_index UInt64 DEFAULT 0,
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, validator_index, epoch)
-        """)
-
-        # Proposer slashings table - single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.proposer_slashings (
-            slot UInt64,
-            slashing_index UInt64,
-            header_1_slot UInt64 DEFAULT 0,
-            header_1_proposer_index UInt64 DEFAULT 0,
-            header_1_parent_root String DEFAULT '',
-            header_1_state_root String DEFAULT '',
-            header_1_body_root String DEFAULT '',
-            header_1_signature String DEFAULT '',
-            header_2_slot UInt64 DEFAULT 0,
-            header_2_proposer_index UInt64 DEFAULT 0,
-            header_2_parent_root String DEFAULT '',
-            header_2_state_root String DEFAULT '',
-            header_2_body_root String DEFAULT '',
-            header_2_signature String DEFAULT '',
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, slashing_index, header_1_proposer_index)
-        """)
-
-        # Attester slashings table - single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.attester_slashings (
-            slot UInt64,
-            slashing_index UInt64,
-            att_1_slot UInt64 DEFAULT 0,
-            att_1_committee_index UInt64 DEFAULT 0,
-            att_1_beacon_block_root String DEFAULT '',
-            att_1_source_epoch UInt64 DEFAULT 0,
-            att_1_source_root String DEFAULT '',
-            att_1_target_epoch UInt64 DEFAULT 0,
-            att_1_target_root String DEFAULT '',
-            att_1_signature String DEFAULT '',
-            att_1_attesting_indices String DEFAULT '[]',
-            att_1_validator_count UInt32 DEFAULT 0,
-            att_2_slot UInt64 DEFAULT 0,
-            att_2_committee_index UInt64 DEFAULT 0,
-            att_2_beacon_block_root String DEFAULT '',
-            att_2_source_epoch UInt64 DEFAULT 0,
-            att_2_source_root String DEFAULT '',
-            att_2_target_epoch UInt64 DEFAULT 0,
-            att_2_target_root String DEFAULT '',
-            att_2_signature String DEFAULT '',
-            att_2_attesting_indices String DEFAULT '[]',
-            att_2_validator_count UInt32 DEFAULT 0,
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            total_slashed_validators UInt32 DEFAULT 0,
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, slashing_index, att_1_committee_index)
-        """)
-
-        # BLS changes table - single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.bls_changes (
-            slot UInt64,
-            change_index UInt64,
-            signature String DEFAULT '',
-            validator_index UInt64 DEFAULT 0,
-            from_bls_pubkey String DEFAULT '',
-            to_execution_address String DEFAULT '',
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, change_index, validator_index)
-        """)
-
-        # Blob commitments table - single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.blob_commitments (
-            slot UInt64,
-            commitment_index UInt64,
-            commitment String DEFAULT '',
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, commitment_index)
-        """)
-
-        # Execution requests table - single timestamp
-        self.client.command(f"""
-        CREATE TABLE IF NOT EXISTS {self.database}.execution_requests (
-            slot UInt64,
-            request_type String,
-            request_index UInt64,
-            pubkey String DEFAULT '',
-            withdrawal_credentials String DEFAULT '',
-            amount UInt64 DEFAULT 0,
-            signature String DEFAULT '',
-            deposit_request_index UInt64 DEFAULT 0,
-            source_address String DEFAULT '',
-            validator_pubkey String DEFAULT '',
-            source_pubkey String DEFAULT '',
-            target_pubkey String DEFAULT '',
-            timestamp_utc DateTime DEFAULT toDateTime(0),
-            insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-        ) ENGINE = ReplacingMergeTree(insert_version)
-        PARTITION BY toStartOfMonth(timestamp_utc)
-        ORDER BY (slot, request_type, request_index)
-        """)
+    def run_migrations(self, target_version: Optional[str] = None) -> bool:
+        """Manually run migrations to target version"""
+        try:
+            migration_manager = MigrationManager(self.client, self.database)
+            return migration_manager.run_migrations(target_version)
+        except Exception as e:
+            logger.error(f"Failed to run migrations: {e}")
+            return False
 
     def load_dataframe_to_table(self, df: pd.DataFrame, table_name: str) -> int:
         """Optimized bulk loading with single global batch size"""

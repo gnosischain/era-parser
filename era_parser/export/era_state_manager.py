@@ -1,6 +1,6 @@
 """
 Era processing state management for granular dataset tracking.
-Complete version with robust error handling and table creation.
+Updated version with migration support and simplified table creation.
 """
 
 import os
@@ -10,6 +10,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 import clickhouse_connect
+
+from .migrations import MigrationManager
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +33,7 @@ class EraDatasetState:
     processing_duration_ms: Optional[int] = None
 
 class EraStateManager:
-    """Manages era file processing state with granular dataset tracking."""
+    """Manages era file processing state with granular dataset tracking and migration support."""
     
     # All possible datasets that can be extracted from era files
     ALL_DATASETS = [
@@ -76,78 +78,25 @@ class EraStateManager:
             raise
 
     def _ensure_tables(self) -> bool:
-        """Create era processing state table and views - with error handling"""
-        
+        """Create era processing state tables using migration system"""
         try:
-            # Main state table
-            self.client.command(f"""
-            CREATE TABLE IF NOT EXISTS {self.database}.era_processing_state (
-                `era_filename` String,              
-                `network` String,                   
-                `era_number` UInt32,               
-                `dataset` String,                   
-                `status` String,                    
-                `worker_id` String DEFAULT '',     
-                `attempt_count` UInt8 DEFAULT 0,   
-                `created_at` DateTime DEFAULT now(),
-                `completed_at` Nullable(DateTime),
-                `rows_inserted` Nullable(UInt64),  
-                `file_hash` String DEFAULT '',     
-                `error_message` Nullable(String),
-                `processing_duration_ms` Nullable(UInt64),
-                `insert_version` UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9)),
+            # Use migration system to ensure tables
+            migration_manager = MigrationManager(self.client, self.database)
+            
+            # Run migrations up to migration 003 (includes era state tables and views)
+            success = migration_manager.run_migrations("003")
+            
+            if success:
+                logger.info("Era state management tables ensured via migrations")
+                return True
+            else:
+                logger.error("Migration system failed and no fallback available")
+                print(f"⚠️  Warning: Could not create era state management tables via migrations")
+                print(f"   Era state management will be disabled for this session")
+                return False
                 
-                INDEX idx_status (status) TYPE minmax GRANULARITY 4,
-                INDEX idx_network_dataset (network, dataset) TYPE minmax GRANULARITY 4,
-                INDEX idx_era_number (era_number) TYPE minmax GRANULARITY 4
-            ) ENGINE = ReplacingMergeTree(insert_version)
-            PARTITION BY (network, toYYYYMM(created_at))
-            ORDER BY (era_filename, dataset)
-            SETTINGS index_granularity = 8192
-            """)
-            logger.info("Created era_processing_state table")
-
-            # Era-level progress view
-            self.client.command(f"""
-            CREATE VIEW IF NOT EXISTS {self.database}.era_processing_progress AS
-            SELECT 
-                network,
-                era_filename,
-                era_number,
-                countIf(status = 'completed') as completed_datasets,
-                countIf(status = 'processing') as processing_datasets,
-                countIf(status = 'failed') as failed_datasets,
-                countIf(status = 'pending') as pending_datasets,
-                count(*) as total_datasets,
-                sum(rows_inserted) as total_rows_inserted,
-                maxIf(completed_at, status = 'completed') as last_completed_at
-            FROM {self.database}.era_processing_state
-            GROUP BY network, era_filename, era_number
-            """)
-            logger.info("Created era_processing_progress view")
-
-            # Dataset-level progress view  
-            self.client.command(f"""
-            CREATE VIEW IF NOT EXISTS {self.database}.dataset_processing_progress AS
-            SELECT
-                network,
-                dataset,
-                countIf(status = 'completed') as completed_eras,
-                countIf(status = 'processing') as processing_eras,
-                countIf(status = 'failed') as failed_eras,
-                countIf(status = 'pending') as pending_eras,
-                count(*) as total_eras,
-                sum(rows_inserted) as total_rows_inserted,
-                maxIf(era_number, status = 'completed') as highest_completed_era
-            FROM {self.database}.era_processing_state  
-            GROUP BY network, dataset
-            """)
-            logger.info("Created dataset_processing_progress view")
-            
-            return True
-            
         except Exception as e:
-            logger.error(f"Error creating era state tables/views: {e}")
+            logger.error(f"Migration-based table creation failed: {e}")
             print(f"⚠️  Warning: Could not create era state management tables: {e}")
             print(f"   Era state management will be disabled for this session")
             return False
@@ -172,18 +121,18 @@ class EraStateManager:
                 logger.warning("era_processing_state table does not exist")
                 return False
             
-            # Check if the views exist
+            # Check if the main view exists
             result = self.client.query(f"""
             SELECT count(*) 
             FROM system.tables 
             WHERE database = '{self.database}' 
-              AND name IN ('era_processing_progress', 'dataset_processing_progress')
+              AND name = 'era_processing_progress'
             """)
             
-            views_exist = result.result_rows[0][0] == 2
+            view_exists = result.result_rows[0][0] > 0
             
-            if not views_exist:
-                logger.warning("era_processing_progress or dataset_processing_progress views do not exist")
+            if not view_exists:
+                logger.warning("era_processing_progress view does not exist")
                 return False
                 
             return True
@@ -618,3 +567,21 @@ class EraStateManager:
         except Exception as e:
             logger.error(f"Error cleaning up stale processing: {e}")
             return 0
+
+    def get_migration_status(self) -> Dict[str, Any]:
+        """Get migration status from the ClickHouse service"""
+        try:
+            # Import here to avoid circular dependencies
+            from .clickhouse_service import ClickHouseService
+            service = ClickHouseService()
+            return service.get_migration_status()
+        except Exception as e:
+            logger.error(f"Failed to get migration status: {e}")
+            return {
+                'applied_count': 0,
+                'available_count': 0,
+                'pending_count': 0,
+                'last_applied': None,
+                'pending_versions': [],
+                'error': str(e)
+            }
