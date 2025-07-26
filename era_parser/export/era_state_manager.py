@@ -1,13 +1,11 @@
 """
-Era processing state management for granular dataset tracking.
-Updated version with migration support and simplified table creation.
+Simplified era completion tracking and data cleanup
 """
 
 import os
 import logging
-import hashlib
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional, Tuple, Set
+from datetime import datetime
 from dataclasses import dataclass
 import clickhouse_connect
 
@@ -16,24 +14,21 @@ from .migrations import MigrationManager
 logger = logging.getLogger(__name__)
 
 @dataclass
-class EraDatasetState:
-    """Represents the state of a specific dataset within an era file."""
-    era_filename: str
-    network: str
+class EraStatus:
+    """Simple era completion status"""
     era_number: int
-    dataset: str
-    status: str = "pending"  # pending, processing, completed, failed
-    worker_id: str = ""
-    attempt_count: int = 0
-    created_at: Optional[datetime] = None
+    network: str
+    status: str  # 'completed' or 'failed'
+    slot_start: int
+    slot_end: int
+    total_records: int
+    datasets_processed: List[str]
     completed_at: Optional[datetime] = None
-    rows_inserted: Optional[int] = None
-    file_hash: str = ""
-    error_message: Optional[str] = None
-    processing_duration_ms: Optional[int] = None
+    error_message: str = ""
+    retry_count: int = 0
 
 class EraStateManager:
-    """Manages era file processing state with granular dataset tracking and migration support."""
+    """Simplified era completion tracking with data cleanup"""
     
     # All possible datasets that can be extracted from era files
     ALL_DATASETS = [
@@ -78,510 +73,408 @@ class EraStateManager:
             raise
 
     def _ensure_tables(self) -> bool:
-        """Create era processing state tables using migration system"""
+        """Create era completion tables using migration system"""
         try:
-            # Use migration system to ensure tables
             migration_manager = MigrationManager(self.client, self.database)
-            
-            # Run migrations up to migration 003 (includes era state tables and views)
-            success = migration_manager.run_migrations("003")
+            success = migration_manager.run_migrations()
             
             if success:
-                logger.info("Era state management tables ensured via migrations")
+                logger.info("Era completion tables ensured via migrations")
                 return True
             else:
-                logger.error("Migration system failed and no fallback available")
-                print(f"⚠️  Warning: Could not create era state management tables via migrations")
-                print(f"   Era state management will be disabled for this session")
+                logger.error("Migration system failed")
                 return False
                 
         except Exception as e:
             logger.error(f"Migration-based table creation failed: {e}")
-            print(f"⚠️  Warning: Could not create era state management tables: {e}")
-            print(f"   Era state management will be disabled for this session")
             return False
 
-    def check_tables_exist(self) -> bool:
-        """Check if era state management tables exist"""
+    def get_era_slot_range(self, era_number: int, network: str) -> Tuple[int, int]:
+        """Calculate slot range for an era"""
+        from ..config import get_network_config
+        
+        config = get_network_config(network)
+        slots_per_era = config['SLOTS_PER_HISTORICAL_ROOT']
+        
+        start_slot = era_number * slots_per_era
+        end_slot = start_slot + slots_per_era - 1
+        
+        return start_slot, end_slot
+
+    def clean_era_data(self, era_number: int, network: str) -> None:
+        """Clean all data for an era's slot range - used for failed/processing eras"""
+        if not self.tables_available:
+            logger.warning("Tables not available, skipping cleanup")
+            return
+            
+        try:
+            start_slot, end_slot = self.get_era_slot_range(era_number, network)
+            
+            print(f"🧹 Cleaning era {era_number} data (slots {start_slot}-{end_slot})")
+            
+            # Delete from all beacon chain tables
+            tables_cleaned = 0
+            for table in self.ALL_DATASETS:
+                try:
+                    # Check if table has data first
+                    count_result = self.client.query(f"""
+                        SELECT count(*) 
+                        FROM {self.database}.{table} 
+                        WHERE slot >= {start_slot} AND slot <= {end_slot}
+                    """)
+                    
+                    record_count = count_result.result_rows[0][0] if count_result.result_rows else 0
+                    
+                    if record_count > 0:
+                        print(f"   🗑️  Cleaning {record_count} records from {table}")
+                        self.client.command(f"""
+                            DELETE FROM {self.database}.{table} 
+                            WHERE slot >= {start_slot} AND slot <= {end_slot}
+                        """)
+                        tables_cleaned += 1
+                        
+                except Exception as e:
+                    print(f"   ⚠️  Could not clean {table}: {e}")
+                    continue
+            
+            # Remove ALL completion records for this era (processing/failed records)
+            self.client.command(f"""
+                DELETE FROM {self.database}.era_completion 
+                WHERE network = '{network}' AND era_number = {era_number}
+            """)
+            
+            print(f"✅ Cleaned era {era_number} ({tables_cleaned} tables had data)")
+            
+        except Exception as e:
+            print(f"❌ Error cleaning era {era_number}: {e}")
+            raise
+
+    def record_era_start(self, era_number: int, network: str) -> None:
+        """Record that era processing has started"""
+        if not self.tables_available:
+            return
+            
+        try:
+            start_slot, end_slot = self.get_era_slot_range(era_number, network)
+            
+            # Always insert as 'processing' when starting
+            self.client.insert(
+                f'{self.database}.era_completion',
+                [[network, era_number, 'processing', start_slot, end_slot, 0, [], 
+                datetime.now(), datetime.now(), 'Processing...', 0]],
+                column_names=['network', 'era_number', 'status', 'slot_start', 'slot_end',
+                            'total_records', 'datasets_processed', 'processing_started_at',
+                            'completed_at', 'error_message', 'retry_count']
+            )
+            
+            print(f"📝 Era {era_number} marked as 'processing'")
+            
+        except Exception as e:
+            logger.error(f"Error recording era start: {e}")
+
+    def record_era_completion(self, era_number: int, network: str, 
+                            datasets_processed: List[str], total_records: int) -> None:
+        """Record successful era completion - UPDATE existing record"""
+        if not self.tables_available:
+            return
+            
+        try:
+            start_slot, end_slot = self.get_era_slot_range(era_number, network)
+            
+            # Insert new record with 'completed' status (ReplacingMergeTree will handle the replacement)
+            self.client.insert(
+                f'{self.database}.era_completion',
+                [[network, era_number, 'completed', start_slot, end_slot, total_records, 
+                datasets_processed, datetime.now(), datetime.now(), '', 0]],
+                column_names=['network', 'era_number', 'status', 'slot_start', 'slot_end',
+                            'total_records', 'datasets_processed', 'processing_started_at',
+                            'completed_at', 'error_message', 'retry_count']
+            )
+            
+            print(f"✅ Era {era_number} marked as 'completed' with {total_records} records")
+            
+        except Exception as e:
+            logger.error(f"Error recording era completion: {e}")
+
+    def record_era_failure(self, era_number: int, network: str, error_message: str) -> None:
+        """Record era processing failure - UPDATE existing record"""
+        if not self.tables_available:
+            return
+            
+        try:
+            start_slot, end_slot = self.get_era_slot_range(era_number, network)
+            
+            # Get retry count
+            retry_count = self.get_era_retry_count(era_number, network) + 1
+            
+            # Insert new record with 'failed' status
+            self.client.insert(
+                f'{self.database}.era_completion',
+                [[network, era_number, 'failed', start_slot, end_slot, 0, [], 
+                datetime.now(), datetime.now(), error_message[:500], retry_count]],
+                column_names=['network', 'era_number', 'status', 'slot_start', 'slot_end',
+                            'total_records', 'datasets_processed', 'processing_started_at',
+                            'completed_at', 'error_message', 'retry_count']
+            )
+            
+            print(f"❌ Era {era_number} marked as 'failed' (attempt {retry_count}): {error_message}")
+            
+        except Exception as e:
+            logger.error(f"Error recording era failure: {e}")
+
+
+    def get_era_retry_count(self, era_number: int, network: str) -> int:
+        """Get current retry count for an era"""
+        if not self.tables_available:
+            return 0
+            
+        try:
+            result = self.client.query(f"""
+                SELECT COALESCE(MAX(retry_count), 0)
+                FROM {self.database}.era_completion
+                WHERE network = '{network}' AND era_number = {era_number}
+            """)
+            
+            return result.result_rows[0][0] if result.result_rows else 0
+            
+        except Exception as e:
+            logger.error(f"Error getting retry count: {e}")
+            return 0
+
+    def get_completed_eras(self, network: str, start_era: int = None, end_era: int = None) -> Set[int]:
+        """Get set of ONLY completed era numbers"""
+        if not self.tables_available:
+            return set()
+            
+        try:
+            query = f"""
+                SELECT era_number
+                FROM {self.database}.era_status
+                WHERE network = '{network}' AND status = 'completed'
+            """
+            
+            if start_era is not None:
+                query += f" AND era_number >= {start_era}"
+            if end_era is not None:
+                query += f" AND era_number <= {end_era}"
+                
+            query += " ORDER BY era_number"
+            
+            result = self.client.query(query)
+            completed = {row[0] for row in result.result_rows}
+            
+            print(f"📊 Found {len(completed)} completed eras for {network}")
+            return completed
+            
+        except Exception as e:
+            logger.error(f"Error getting completed eras: {e}")
+            return set()
+
+    def get_failed_eras(self, network: str) -> List[int]:
+        """Get list of failed era numbers"""
+        if not self.tables_available:
+            return []
+            
+        try:
+            result = self.client.query(f"""
+                SELECT era_number
+                FROM {self.database}.era_status
+                WHERE network = '{network}' AND status = 'failed'
+                ORDER BY era_number
+            """)
+            
+            return [row[0] for row in result.result_rows]
+            
+        except Exception as e:
+            logger.error(f"Error getting failed eras: {e}")
+            return []
+
+    def clean_failed_eras(self, network: str) -> List[int]:
+        """Clean all failed eras and return list"""
+        failed_eras = self.get_failed_eras(network)
+        
+        for era_number in failed_eras:
+            try:
+                self.clean_era_data(era_number, network)
+                logger.info(f"Cleaned failed era {era_number}")
+            except Exception as e:
+                logger.error(f"Failed to clean era {era_number}: {e}")
+                continue
+        
+        return failed_eras
+
+    def era_has_partial_data(self, era_number: int, network: str) -> bool:
+        """Check if era has any data in beacon chain tables"""
         if not self.tables_available:
             return False
             
         try:
-            # Check if the main table exists
-            result = self.client.query(f"""
-            SELECT count(*) 
-            FROM system.tables 
-            WHERE database = '{self.database}' 
-              AND name = 'era_processing_state'
-            """)
+            start_slot, end_slot = self.get_era_slot_range(era_number, network)
             
-            table_exists = result.result_rows[0][0] > 0
+            # Check if any table has data in this slot range
+            for table in ['blocks', 'transactions', 'attestations']:  # Check main tables
+                try:
+                    result = self.client.query(f"""
+                        SELECT count(*) 
+                        FROM {self.database}.{table} 
+                        WHERE slot >= {start_slot} AND slot <= {end_slot} 
+                        LIMIT 1
+                    """)
+                    
+                    if result.result_rows and result.result_rows[0][0] > 0:
+                        return True
+                        
+                except Exception:
+                    continue
             
-            if not table_exists:
-                logger.warning("era_processing_state table does not exist")
-                return False
-            
-            # Check if the main view exists
-            result = self.client.query(f"""
-            SELECT count(*) 
-            FROM system.tables 
-            WHERE database = '{self.database}' 
-              AND name = 'era_processing_progress'
-            """)
-            
-            view_exists = result.result_rows[0][0] > 0
-            
-            if not view_exists:
-                logger.warning("era_processing_progress view does not exist")
-                return False
-                
-            return True
+            return False
             
         except Exception as e:
-            logger.error(f"Error checking if tables exist: {e}")
+            logger.error(f"Error checking partial data for era {era_number}: {e}")
             return False
 
+    def optimize_tables(self) -> None:
+        """Optimize all tables for deduplication"""
+        if not self.tables_available:
+            logger.warning("Tables not available, skipping optimization")
+            return
+            
+        logger.info("Optimizing tables for deduplication...")
+        
+        for table in self.ALL_DATASETS:
+            try:
+                logger.info(f"Optimizing {table}...")
+                self.client.command(f"OPTIMIZE TABLE {self.database}.{table} FINAL")
+                logger.info(f"Optimized {table}")
+            except Exception as e:
+                logger.warning(f"Could not optimize {table}: {e}")
+                continue
+        
+        logger.info("Table optimization completed")
+
+    def get_era_status_summary(self, network: str) -> Dict[str, Any]:
+        """Get era processing summary for a network"""
+        if not self.tables_available:
+            return {'completed': 0, 'failed': 0, 'total_records': 0}
+            
+        try:
+            result = self.client.query(f"""
+                SELECT 
+                    status,
+                    count(*) as count,
+                    sum(total_records) as total_records
+                FROM {self.database}.era_status
+                WHERE network = '{network}'
+                GROUP BY status
+            """)
+            
+            summary = {'completed': 0, 'failed': 0, 'total_records': 0}
+            
+            for row in result.result_rows:
+                status, count, total_records = row
+                summary[status] = count
+                if status == 'completed':
+                    summary['total_records'] = total_records or 0
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Error getting era status summary: {e}")
+            return {'completed': 0, 'failed': 0, 'total_records': 0}
+
+    # Legacy compatibility methods (removed)
+    def is_era_fully_processed(self, era_filename: str, target_datasets: List[str] = None) -> bool:
+        """Legacy compatibility - always return False to force new processing"""
+        return False
+    
+    def get_pending_datasets(self, era_filename: str, target_datasets: List[str] = None) -> List[str]:
+        """Legacy compatibility - return all datasets"""
+        return target_datasets or self.ALL_DATASETS
+    
+    def claim_dataset(self, era_filename: str, dataset: str, worker_id: str, file_hash: str = "") -> bool:
+        """Legacy compatibility - always allow"""
+        return True
+    
+    def complete_dataset(self, era_filename: str, dataset: str, rows_inserted: int = 0, processing_duration_ms: int = None) -> None:
+        """Legacy compatibility - do nothing"""
+        pass
+    
+    def fail_dataset(self, era_filename: str, dataset: str, error_message: str) -> None:
+        """Legacy compatibility - do nothing"""
+        pass
+    
+    def cleanup_stale_processing(self, timeout_minutes: int = 30) -> int:
+        """Legacy compatibility - return 0"""
+        return 0
+    
+    def get_processing_summary(self, network: str = None) -> Dict[str, Any]:
+        """Legacy compatibility - return empty"""
+        return {'era_summary': {}, 'dataset_summary': {}}
+    
+    def get_failed_datasets(self, network: str = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Legacy compatibility - return empty"""
+        return []
+    
     @staticmethod
     def calculate_file_hash(filepath: str) -> str:
         """Calculate hash of era file for tracking"""
+        import hashlib
         hasher = hashlib.md5()
         with open(filepath, 'rb') as f:
             for chunk in iter(lambda: f.read(4096), b""):
                 hasher.update(chunk)
         return hasher.hexdigest()
-
+    
     def get_era_filename_from_path(self, era_file_path: str) -> str:
         """Extract era filename from full path"""
         import os
         return os.path.basename(era_file_path)
+    
 
-    def get_era_number_from_filename(self, era_filename: str) -> int:
-        """Extract era number from filename"""
-        parts = era_filename.replace('.era', '').split('-')
-        
-        # Handle different filename formats:
-        # Format 1: network-XXXXX.era (e.g., gnosis-00001.era)
-        # Format 2: network-XXXXX-hash.era (e.g., gnosis-00001-fe3b60d1.era)
-        
-        if len(parts) == 2:
-            # Format 1: network-XXXXX.era
-            try:
-                return int(parts[1])  # Take the era number part
-            except (ValueError, TypeError):
-                return 0
-        elif len(parts) >= 3:
-            # Format 2: network-XXXXX-hash.era
-            try:
-                return int(parts[1])  # Take the era number part (second element)
-            except (ValueError, TypeError):
-                return 0
-        
-        # Fallback: try to find any 5-digit number in the filename
-        import re
-        match = re.search(r'-(\d{5})-?', era_filename)
-        if match:
-            return int(match.group(1))
-        
-        return 0
-
-    def get_network_from_filename(self, era_filename: str) -> str:
-        """Extract network from filename"""
-        filename_lower = era_filename.lower()
-        if 'gnosis' in filename_lower:
-            return 'gnosis'
-        elif 'sepolia' in filename_lower:
-            return 'sepolia'
-        else:
-            return 'mainnet'
-
-    def is_era_fully_processed(self, era_filename: str, target_datasets: List[str] = None) -> bool:
-        """
-        Check if era file is fully processed for all target datasets.
-        Returns False if tables don't exist.
-        """
-        if not self.check_tables_exist():
+    def should_clean_era(self, era_number: int, network: str) -> bool:
+        """Check if era needs cleaning (has any data or processing records)"""
+        if not self.tables_available:
             return False
             
-        if target_datasets is None:
-            target_datasets = self.ALL_DATASETS
-
         try:
-            datasets_str = "','".join(target_datasets)
-            result = self.client.query(f"""
-            SELECT 
-                dataset,
-                status
-            FROM {self.database}.era_processing_state
-            WHERE era_filename = '{era_filename}'
-              AND dataset IN ('{datasets_str}')
-            ORDER BY dataset DESC, created_at DESC
+            start_slot, end_slot = self.get_era_slot_range(era_number, network)
+            
+            # Check if any beacon chain table has data in this slot range
+            for table in ['blocks', 'attestations', 'sync_aggregates']:  # Check main tables only
+                try:
+                    count_result = self.client.query(f"""
+                        SELECT count(*) 
+                        FROM {self.database}.{table} 
+                        WHERE slot >= {start_slot} AND slot <= {end_slot}
+                        LIMIT 1
+                    """)
+                    
+                    if count_result.result_rows and count_result.result_rows[0][0] > 0:
+                        return True  # Found data, needs cleaning
+                        
+                except Exception:
+                    continue
+            
+            # Check if there are any completion records (processing/failed)
+            completion_result = self.client.query(f"""
+                SELECT count(*) 
+                FROM {self.database}.era_completion 
+                WHERE network = '{network}' AND era_number = {era_number}
             """)
             
-            # Get latest status for each dataset
-            dataset_statuses = {}
-            for row in result.result_rows:
-                dataset = row[0]
-                status = row[1]
-                if dataset not in dataset_statuses:  # Take most recent
-                    dataset_statuses[dataset] = status
+            if completion_result.result_rows and completion_result.result_rows[0][0] > 0:
+                return True  # Has completion records, needs cleaning
             
-            # Check if all target datasets are completed
-            for dataset in target_datasets:
-                if dataset not in dataset_statuses or dataset_statuses[dataset] != 'completed':
-                    return False
-            
-            return True
+            return False  # No data, no cleaning needed
             
         except Exception as e:
-            logger.error(f"Error checking era processing status: {e}")
-            return False
+            logger.error(f"Error checking if era {era_number} needs cleaning: {e}")
+            return True  # If in doubt, clean to be safe
 
-    def get_pending_datasets(self, era_filename: str, target_datasets: List[str] = None) -> List[str]:
-        """
-        Get list of datasets that need processing for this era.
-        Returns all datasets if tables don't exist.
-        """
-        if not self.check_tables_exist():
-            return target_datasets or self.ALL_DATASETS
-            
-        if target_datasets is None:
-            target_datasets = self.ALL_DATASETS
-
-        try:
-            datasets_str = "','".join(target_datasets)
-            result = self.client.query(f"""
-            SELECT 
-                dataset,
-                status
-            FROM {self.database}.era_processing_state
-            WHERE era_filename = '{era_filename}'
-              AND dataset IN ('{datasets_str}')
-            ORDER BY dataset DESC, created_at DESC
-            """)
-            
-            # Get latest status for each dataset
-            dataset_statuses = {}
-            for row in result.result_rows:
-                dataset = row[0]
-                status = row[1]
-                if dataset not in dataset_statuses:  # Take most recent
-                    dataset_statuses[dataset] = status
-            
-            # Find datasets that need processing
-            pending_datasets = []
-            for dataset in target_datasets:
-                if dataset not in dataset_statuses or dataset_statuses[dataset] != 'completed':
-                    pending_datasets.append(dataset)
-            
-            return pending_datasets
-            
-        except Exception as e:
-            logger.error(f"Error getting pending datasets: {e}")
-            return target_datasets  # Return all if error
-
-    def claim_dataset(self, era_filename: str, dataset: str, worker_id: str, 
-                     file_hash: str = "") -> bool:
-        """
-        Atomically claim a dataset for processing.
-        Returns False if tables don't exist.
-        """
-        if not self.check_tables_exist():
-            return True  # Allow processing if no state management
-            
-        try:
-            # Check current status
-            result = self.client.query(f"""
-            SELECT status, created_at
-            FROM {self.database}.era_processing_state
-            WHERE era_filename = '{era_filename}'
-              AND dataset = '{dataset}'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """)
-            
-            if result.result_rows:
-                status = result.result_rows[0][0]
-                created_at = result.result_rows[0][1]
-                
-                # Don't claim if already completed
-                if status == 'completed':
-                    return False
-                
-                # Don't claim if recently processing (less than 30 minutes old)
-                if status == 'processing' and created_at:
-                    stale_threshold = datetime.now() - timedelta(minutes=30)
-                    if created_at > stale_threshold:
-                        return False
-            
-            # Extract era metadata
-            network = self.get_network_from_filename(era_filename)
-            era_number = self.get_era_number_from_filename(era_filename)
-            
-            # Claim the dataset
-            self.client.insert(
-                f'{self.database}.era_processing_state',
-                [[era_filename, network, era_number, dataset, 'processing', worker_id, 0, file_hash, '', None]],
-                column_names=['era_filename', 'network', 'era_number', 'dataset', 'status', 'worker_id', 'attempt_count', 'file_hash', 'error_message', 'processing_duration_ms']
-            )
-            
-            logger.debug(f"Claimed dataset {dataset} for era {era_filename} (worker: {worker_id})")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error claiming dataset: {e}")
-            return True  # Allow processing if claim fails
-
-    def complete_dataset(self, era_filename: str, dataset: str, rows_inserted: int = 0, 
-                        processing_duration_ms: int = None) -> None:
-        """
-        Mark a dataset as completed.
-        Silently fails if tables don't exist.
-        """
-        if not self.check_tables_exist():
+    def clean_era_data_if_needed(self, era_number: int, network: str) -> None:
+        """Clean era data only if needed"""
+        if not self.should_clean_era(era_number, network):
+            print(f"✅ Era {era_number} already clean, skipping cleanup")
             return
-            
-        try:
-            network = self.get_network_from_filename(era_filename)
-            era_number = self.get_era_number_from_filename(era_filename)
-            
-            self.client.insert(
-                f'{self.database}.era_processing_state',
-                [[era_filename, network, era_number, dataset, 'completed', '', 0, '', '', rows_inserted, processing_duration_ms]],
-                column_names=['era_filename', 'network', 'era_number', 'dataset', 'status', 'worker_id', 'attempt_count', 'file_hash', 'error_message', 'rows_inserted', 'processing_duration_ms']
-            )
-            
-            logger.debug(f"Completed dataset {dataset} for era {era_filename} ({rows_inserted} rows)")
-            
-        except Exception as e:
-            logger.error(f"Error completing dataset: {e}")
-
-    def fail_dataset(self, era_filename: str, dataset: str, error_message: str) -> None:
-        """
-        Mark a dataset as failed.
-        Silently fails if tables don't exist.
-        """
-        if not self.check_tables_exist():
-            return
-            
-        try:
-            network = self.get_network_from_filename(era_filename)
-            era_number = self.get_era_number_from_filename(era_filename)
-            
-            # Get current attempt count
-            result = self.client.query(f"""
-            SELECT COALESCE(MAX(attempt_count), 0) + 1
-            FROM {self.database}.era_processing_state
-            WHERE era_filename = '{era_filename}'
-              AND dataset = '{dataset}'
-            """)
-            next_attempt = result.result_rows[0][0] if result.result_rows else 1
-            
-            # Truncate and escape error message
-            safe_error = error_message[:500] if error_message else ""
-            safe_error = safe_error.replace("'", "''")
-            
-            self.client.insert(
-                f'{self.database}.era_processing_state',
-                [[era_filename, network, era_number, dataset, 'failed', '', next_attempt, '', safe_error, None, None]],
-                column_names=['era_filename', 'network', 'era_number', 'dataset', 'status', 'worker_id', 'attempt_count', 'file_hash', 'error_message', 'rows_inserted', 'processing_duration_ms']
-            )
-            
-            logger.error(f"Failed dataset {dataset} for era {era_filename} (attempt {next_attempt}): {error_message}")
-            
-        except Exception as e:
-            logger.error(f"Error marking dataset as failed: {e}")
-
-    def get_processing_summary(self, network: str = None) -> Dict[str, Any]:
-        """
-        Get processing summary across all eras and datasets.
-        Returns empty summary if tables don't exist.
-        """
-        if not self.check_tables_exist():
-            return {'era_summary': {}, 'dataset_summary': {}}
-            
-        try:
-            network_filter = f"AND network = '{network}'" if network else ""
-            
-            # Era-level summary
-            era_result = self.client.query(f"""
-            SELECT 
-                network,
-                COUNT(DISTINCT era_filename) as total_eras,
-                countIf(completed_datasets = total_datasets) as fully_completed_eras,
-                countIf(processing_datasets > 0) as processing_eras,
-                countIf(failed_datasets > 0 AND completed_datasets = 0) as fully_failed_eras,
-                SUM(total_rows_inserted) as total_rows
-            FROM {self.database}.era_processing_progress
-            WHERE 1=1 {network_filter}
-            GROUP BY network
-            """)
-            
-            # Dataset-level summary
-            dataset_result = self.client.query(f"""
-            SELECT 
-                network,
-                dataset,
-                completed_eras,
-                failed_eras,
-                total_rows_inserted,
-                highest_completed_era
-            FROM {self.database}.dataset_processing_progress
-            WHERE 1=1 {network_filter}
-            ORDER BY network, dataset
-            """)
-            
-            summary = {
-                'era_summary': {},
-                'dataset_summary': {}
-            }
-            
-            # Process era summary
-            for row in era_result.result_rows:
-                net = row[0]
-                summary['era_summary'][net] = {
-                    'total_eras': row[1],
-                    'fully_completed_eras': row[2],
-                    'processing_eras': row[3],
-                    'fully_failed_eras': row[4],
-                    'total_rows': row[5]
-                }
-            
-            # Process dataset summary
-            for row in dataset_result.result_rows:
-                net = row[0]
-                dataset = row[1]
-                if net not in summary['dataset_summary']:
-                    summary['dataset_summary'][net] = {}
-                
-                summary['dataset_summary'][net][dataset] = {
-                    'completed_eras': row[2],
-                    'failed_eras': row[3],
-                    'total_rows': row[4],
-                    'highest_completed_era': row[5]
-                }
-            
-            return summary
-            
-        except Exception as e:
-            logger.error(f"Error getting processing summary: {e}")
-            return {'era_summary': {}, 'dataset_summary': {}}
-
-    def get_failed_datasets(self, network: str = None, limit: int = 100) -> List[Dict[str, Any]]:
-        """
-        Get list of failed datasets for retry.
-        Returns empty list if tables don't exist.
-        """
-        if not self.check_tables_exist():
-            return []
-            
-        try:
-            network_filter = f"AND network = '{network}'" if network else ""
-            
-            result = self.client.query(f"""
-            SELECT 
-                era_filename,
-                network,
-                era_number,
-                dataset,
-                attempt_count,
-                error_message,
-                created_at
-            FROM {self.database}.era_processing_state
-            WHERE status = 'failed' {network_filter}
-            ORDER BY created_at DESC
-            LIMIT {limit}
-            """)
-            
-            failed_datasets = []
-            for row in result.result_rows:
-                failed_datasets.append({
-                    'era_filename': row[0],
-                    'network': row[1],
-                    'era_number': row[2],
-                    'dataset': row[3],
-                    'attempt_count': row[4],
-                    'error_message': row[5],
-                    'created_at': row[6]
-                })
-            
-            return failed_datasets
-            
-        except Exception as e:
-            logger.error(f"Error getting failed datasets: {e}")
-            return []
-
-    def cleanup_stale_processing(self, timeout_minutes: int = 30) -> int:
-        """
-        Reset stale processing entries back to pending.
-        Returns 0 if tables don't exist.
-        """
-        if not self.check_tables_exist():
-            return 0
-            
-        try:
-            stale_threshold = datetime.now() - timedelta(minutes=timeout_minutes)
-            
-            # Find stale processing entries
-            result = self.client.query(f"""
-            SELECT era_filename, dataset, worker_id, created_at
-            FROM {self.database}.era_processing_state
-            WHERE status = 'processing'
-              AND created_at < '{stale_threshold.strftime('%Y-%m-%d %H:%M:%S')}'
-            """)
-            
-            reset_count = 0
-            for row in result.result_rows:
-                era_filename, dataset, worker_id, created_at = row
-                
-                # Check if there's a newer completed entry
-                check_result = self.client.query(f"""
-                SELECT COUNT(*)
-                FROM {self.database}.era_processing_state
-                WHERE era_filename = '{era_filename}'
-                  AND dataset = '{dataset}'
-                  AND status = 'completed'
-                  AND created_at > '{created_at.strftime('%Y-%m-%d %H:%M:%S')}'
-                """)
-                
-                if check_result.result_rows[0][0] > 0:
-                    continue  # Already completed
-                
-                # Reset to pending
-                network = self.get_network_from_filename(era_filename)
-                era_number = self.get_era_number_from_filename(era_filename)
-                
-                self.client.insert(
-                    f'{self.database}.era_processing_state',
-                    [[era_filename, network, era_number, dataset, 'pending', '', 0, '', f'Reset from stale processing (worker: {worker_id})', None, None]],
-                    column_names=['era_filename', 'network', 'era_number', 'dataset', 'status', 'worker_id', 'attempt_count', 'file_hash', 'error_message', 'rows_inserted', 'processing_duration_ms']
-                )
-                
-                reset_count += 1
-                logger.info(f"Reset stale processing: {era_filename}/{dataset} (worker: {worker_id})")
-            
-            if reset_count > 0:
-                logger.info(f"Reset {reset_count} stale processing entries")
-            
-            return reset_count
-            
-        except Exception as e:
-            logger.error(f"Error cleaning up stale processing: {e}")
-            return 0
-
-    def get_migration_status(self) -> Dict[str, Any]:
-        """Get migration status from the ClickHouse service"""
-        try:
-            # Import here to avoid circular dependencies
-            from .clickhouse_service import ClickHouseService
-            service = ClickHouseService()
-            return service.get_migration_status()
-        except Exception as e:
-            logger.error(f"Failed to get migration status: {e}")
-            return {
-                'applied_count': 0,
-                'available_count': 0,
-                'pending_count': 0,
-                'last_applied': None,
-                'pending_versions': [],
-                'error': str(e)
-            }
+        
+        self.clean_era_data(era_number, network)

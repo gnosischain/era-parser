@@ -46,29 +46,44 @@ class EraReader:
         filename = os.path.basename(self.filepath)
         parts = filename.replace('.era', '').split('-')
         
+        era_number = None
+        era_hash = 'unknown'
+        
         if len(parts) >= 2:
             try:
-                era_number = int(parts[-2])
-                start_slot = era_number * self.config['SLOTS_PER_HISTORICAL_ROOT']
-                end_slot = start_slot + self.config['SLOTS_PER_HISTORICAL_ROOT'] - 1
+                # Handle different formats:
+                # gnosis-00001.era -> parts = ['gnosis', '00001']
+                # gnosis-00001-hash.era -> parts = ['gnosis', '00001', 'hash']
+                era_str = parts[1]  # Always take the second part as era number
+                era_number = int(era_str)
                 
-                return {
-                    'era_number': era_number,
-                    'start_slot': start_slot,
-                    'end_slot': end_slot,
-                    'network': self.network,
-                    'hash': parts[-1] if len(parts) > 2 else 'unknown'
-                }
-            except ValueError:
-                pass
+                if len(parts) > 2:
+                    era_hash = parts[2]
+                    
+            except (ValueError, IndexError):
+                print(f"⚠️  Could not parse era number from filename: {filename}")
+                era_number = 0
         
-        return {
-            'era_number': None,
-            'start_slot': None,
-            'end_slot': None,
+        if era_number is not None:
+            start_slot = era_number * self.config['SLOTS_PER_HISTORICAL_ROOT']
+            end_slot = start_slot + self.config['SLOTS_PER_HISTORICAL_ROOT'] - 1
+        else:
+            start_slot = None
+            end_slot = None
+            era_number = 0
+        
+        result = {
+            'era_number': era_number,
+            'start_slot': start_slot,
+            'end_slot': end_slot,
             'network': self.network,
-            'hash': 'unknown'
+            'hash': era_hash,
+            'filename': filename
         }
+        
+        print(f"🔍 Era info extracted: era {era_number}, slots {start_slot}-{end_slot}, network {self.network}")
+        
+        return result
     
     def read_all_records(self) -> List[EraRecord]:
         """Read all records from era file"""

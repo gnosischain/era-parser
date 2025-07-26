@@ -39,6 +39,8 @@ class StateCommand(BaseCommand):
             self._handle_era_cleanup(args[1:])
         elif command_type == "--era-check":
             self._handle_era_check(args[1:])
+        elif command_type == "--clean-failed-eras":
+            self._handle_clean_failed_eras(args[1:])
         else:
             print(f"❌ Unknown state command: {command_type}")
     
@@ -58,53 +60,74 @@ class StateCommand(BaseCommand):
     
     def _handle_era_status(self, args: List[str]) -> None:
         """Handle era status display"""
-        if not self.validate_required_args(args, 1, "era-parser --era-status [network]"):
+        if not self.validate_required_args(args, 1, "era-parser --era-status [network] [era_range]"):
             return
         
         if not self._ensure_environment_loaded():
             return
         
         network = args[0] if args[0] != 'all' else None
+        era_range = args[1] if len(args) > 1 else None
         
         try:
+            from ..export.era_state_manager import EraStateManager
             state_manager = EraStateManager()
-            summary = state_manager.get_processing_summary(network)
             
-            print(f"📊 Era Processing Status" + (f" ({network})" if network else " (All Networks)"))
-            print("="*60)
-            
-            # Era-level summary
-            if summary['era_summary']:
-                print("\n📁 Era Summary:")
-                for net, stats in summary['era_summary'].items():
-                    print(f"  {net}:")
-                    print(f"    Total Eras: {stats['total_eras']}")
-                    print(f"    Fully Completed: {stats['fully_completed_eras']}")
-                    print(f"    Processing: {stats['processing_eras']}")
-                    print(f"    Failed: {stats['fully_failed_eras']}")
-                    print(f"    Total Rows: {stats['total_rows']:,}")
-                    
-                    if stats['total_eras'] > 0:
-                        completion_pct = (stats['fully_completed_eras'] / stats['total_eras']) * 100
-                        print(f"    Completion: {completion_pct:.1f}%")
-            
-            # Dataset-level summary
-            if summary['dataset_summary']:
-                print("\n📊 Dataset Summary:")
-                for net, datasets in summary['dataset_summary'].items():
-                    print(f"  {net}:")
-                    for dataset, stats in datasets.items():
-                        print(f"    {dataset}:")
-                        print(f"      Completed Eras: {stats['completed_eras']}")
-                        print(f"      Failed Eras: {stats['failed_eras']}")
-                        print(f"      Total Rows: {stats['total_rows']:,}")
-                        print(f"      Highest Era: {stats['highest_completed_era']}")
-            
-            if not summary['era_summary'] and not summary['dataset_summary']:
-                print("No processing data found.")
+            if era_range:
+                # Show specific era range
+                if '-' in era_range:
+                    start_str, end_str = era_range.split('-', 1)
+                    start_era, end_era = int(start_str), int(end_str)
+                else:
+                    start_era = end_era = int(era_range)
                 
+                completed = state_manager.get_completed_eras(network, start_era, end_era)
+                failed = state_manager.get_failed_eras(network)
+                failed_in_range = [era for era in failed if start_era <= era <= end_era]
+                
+                print(f"📊 Era Status for {network} ({start_era}-{end_era})")
+                print("="*60)
+                print(f"✅ Completed: {len(completed)} eras")
+                print(f"❌ Failed: {len(failed_in_range)} eras")
+                print(f"⏸️  Not processed: {(end_era - start_era + 1) - len(completed) - len(failed_in_range)} eras")
+                
+                if failed_in_range:
+                    print(f"\nFailed eras: {failed_in_range}")
+            else:
+                # Show summary
+                summary = state_manager.get_era_status_summary(network)
+                
+                print(f"📊 Era Processing Summary" + (f" ({network})" if network else " (All Networks)"))
+                print("="*60)
+                print(f"✅ Completed eras: {summary['completed']}")
+                print(f"❌ Failed eras: {summary['failed']}")
+                print(f"📊 Total records: {summary['total_records']:,}")
+                    
         except Exception as e:
             self.handle_error(e, "getting era status")
+
+    def _handle_clean_failed_eras(self, args: List[str]) -> None:
+        """Handle cleaning failed eras"""
+        if not self.validate_required_args(args, 1, "era-parser --clean-failed-eras <network>"):
+            return
+        
+        if not self._ensure_environment_loaded():
+            return
+        
+        network = args[0]
+        
+        try:
+            from ..export.era_state_manager import EraStateManager
+            state_manager = EraStateManager()
+            failed_eras = state_manager.clean_failed_eras(network)
+            
+            if failed_eras:
+                print(f"🧹 Cleaned {len(failed_eras)} failed eras: {failed_eras}")
+            else:
+                print(f"✅ No failed eras found for {network}")
+                
+        except Exception as e:
+            self.handle_error(e, "cleaning failed eras")
     
     def _handle_era_failed(self, args: List[str]) -> None:
         """Handle failed era datasets display"""

@@ -27,7 +27,6 @@ class BaseCommand(ABC):
         """Parse common flags from arguments"""
         flags = {
             'separate': '--separate' in args,
-            'resume': '--resume' in args,
             'download_only': '--download-only' in args,
             'export_clickhouse': '--export' in args and 'clickhouse' in args
         }
@@ -36,7 +35,7 @@ class BaseCommand(ABC):
         clean_args = [arg for arg in args if not arg.startswith('--')]
         
         return flags, clean_args
-    
+        
     def get_export_type(self, flags: Dict[str, Any]) -> str:
         """Determine export type from flags"""
         return "clickhouse" if flags['export_clickhouse'] else "file"

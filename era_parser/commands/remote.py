@@ -20,6 +20,12 @@ class RemoteCommand(BaseCommand):
                 self._handle_remote_progress(args[1:])
             elif args[0] == "--remote-clear":
                 self._handle_remote_clear(args[1:])
+            elif args[0] == "--clean-failed":
+                self._handle_clean_failed(args[1:])
+            elif args[0] == "--force-clean":
+                self._handle_force_clean(args[1:])
+            elif args[0] == "--optimize":
+                self._handle_optimize_tables(args[1:])
             else:
                 print(f"❌ Unknown remote utility command: {args[0]}")
             return
@@ -65,11 +71,11 @@ class RemoteCommand(BaseCommand):
             print(f"✅ Cleared progress for {network}")
         except ValueError as e:
             print(f"❌ Configuration error: {e}")
-    
+
     def _handle_remote_processing(self, args: List[str]) -> None:
         """Handle main remote processing"""
         if len(args) < 2:
-            print("Usage: era-parser --remote <network> <era_range> <command> [<o>] [--separate] [--resume] [--export clickhouse]")
+            print("Usage: era-parser --remote <network> <era_range> <command> [<o>] [--separate] [--force] [--export clickhouse]")
             print("   or: era-parser --remote <network> <era_range> --download-only")
             return
         
@@ -82,26 +88,28 @@ class RemoteCommand(BaseCommand):
             return
         
         if len(args) < 3:
-            print("Usage: era-parser --remote <network> <era_range> <command> [<o>] [--separate] [--resume] [--export clickhouse]")
+            print("Usage: era-parser --remote <network> <era_range> <command> [<o>] [--separate] [--force] [--export clickhouse]")
             return
         
         command = args[2]
         base_output = args[3] if len(args) > 3 and not args[3].startswith('--') else "output"
         
-        # Parse flags
+        # Parse flags (removed resume)
         flags, _ = self.parse_flags(args[3:])
         separate_files = flags['separate']
-        resume = flags['resume']
+        force = '--force' in args
         export_type = self.get_export_type(flags)
         
         try:
-            result = self._process_remote_eras(
-                network=network,
-                era_range=era_range,
+            downloader = get_remote_era_downloader()
+            downloader.network = network
+            
+            result = downloader.process_era_range(
+                *self._parse_era_range(era_range),
                 command=command,
                 base_output=base_output,
                 separate_files=separate_files,
-                resume=resume,
+                force=force,  # Removed resume parameter
                 export_type=export_type
             )
             
@@ -114,8 +122,8 @@ class RemoteCommand(BaseCommand):
                 print(f"❌ Remote processing failed: {result.get('error', 'Unknown error')}")
                 
         except Exception as e:
-            self.handle_error(e, "remote processing")
-    
+            self.handle_error(e, "remote processing")    
+ 
     def _handle_download_only(self, network: str, era_range: str) -> None:
         """Handle download-only mode"""
         result = self._process_remote_eras(
@@ -203,3 +211,63 @@ class RemoteCommand(BaseCommand):
                 export_type=export_type,
                 processed_eras=processed_eras
             )
+
+    def _handle_clean_failed(self, args: List[str]) -> None:
+        """Handle cleaning failed eras"""
+        if not self.validate_required_args(args, 1, "era-parser --remote --clean-failed <network>"):
+            return
+        
+        network = args[0]
+        
+        try:
+            from ..export.era_state_manager import EraStateManager
+            state_manager = EraStateManager()
+            
+            failed_eras = state_manager.clean_failed_eras(network)
+            
+            if failed_eras:
+                print(f"🧹 Cleaned {len(failed_eras)} failed eras: {failed_eras}")
+            else:
+                print(f"✅ No failed eras found for {network}")
+                
+        except Exception as e:
+            print(f"❌ Failed to clean failed eras: {e}")
+
+    def _handle_force_clean(self, args: List[str]) -> None:
+        """Handle force cleaning specific eras"""
+        if not self.validate_required_args(args, 2, "era-parser --remote --force-clean <network> <era_range>"):
+            return
+        
+        network = args[0]
+        era_range = args[1]
+        
+        try:
+            start_era, end_era = self._parse_era_range(era_range)
+            if end_era is None:
+                end_era = start_era
+            
+            from ..export.era_state_manager import EraStateManager
+            state_manager = EraStateManager()
+            
+            cleaned_count = 0
+            for era_number in range(start_era, end_era + 1):
+                try:
+                    state_manager.clean_era_data(era_number, network)
+                    cleaned_count += 1
+                except Exception as e:
+                    print(f"⚠️  Could not clean era {era_number}: {e}")
+            
+            print(f"🧹 Force cleaned {cleaned_count} eras from {start_era} to {end_era}")
+            
+        except Exception as e:
+            print(f"❌ Failed to force clean eras: {e}")
+
+    def _handle_optimize_tables(self, args: List[str]) -> None:
+        """Handle table optimization"""
+        try:
+            from ..export.era_state_manager import EraStateManager
+            state_manager = EraStateManager()
+            state_manager.optimize_tables()
+            print("✅ Table optimization completed")
+        except Exception as e:
+            print(f"❌ Table optimization failed: {e}")

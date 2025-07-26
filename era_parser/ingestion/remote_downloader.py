@@ -625,58 +625,97 @@ class RemoteEraDownloader:
             print(f"⚠️  Could not check era state: {e}")
             return set()
     
+    def get_eras_to_process(self, start_era: int, end_era: Optional[int], 
+                       force: bool = False) -> List[Tuple[int, str]]:
+        """Determine which eras need processing with simplified logic"""
+        
+        # Get all available eras
+        available_eras = self.discover_era_files(start_era, end_era)
+        print(f"📋 Discovered {len(available_eras)} available eras")
+        
+        if force:
+            # Force mode: clean all eras and process everything
+            print(f"🔥 Force mode: will clean and reprocess all {len(available_eras)} eras")
+            try:
+                from ..export.era_state_manager import EraStateManager
+                state_manager = EraStateManager()
+                for era_number, _ in available_eras:
+                    state_manager.clean_era_data(era_number, self.network)
+            except Exception as e:
+                print(f"⚠️  Could not clean force mode eras: {e}")
+            return available_eras
+        
+        # Normal mode: skip completed eras, process incomplete ones
+        print(f"🔍 Checking for completed eras...")
+        
+        try:
+            from ..export.era_state_manager import EraStateManager
+            state_manager = EraStateManager()
+            
+            # Get the era range for the query
+            era_numbers = [era_num for era_num, _ in available_eras]
+            if era_numbers:
+                min_era = min(era_numbers)
+                max_era = max(era_numbers)
+                print(f"📊 Querying completed eras in range {min_era}-{max_era}...")
+            else:
+                print(f"❌ No era numbers found in available eras")
+                return []
+            
+            completed_eras = state_manager.get_completed_eras(
+                self.network, 
+                min_era, 
+                max_era
+            )
+            
+            print(f"✅ Found {len(completed_eras)} completed eras")
+            
+            # OPTIMIZED: Just filter out completed eras, no partial data check
+            incomplete_eras = []
+            skipped_count = 0
+            
+            print(f"📋 Filtering incomplete eras...")
+            for era_number, url in available_eras:
+                if era_number in completed_eras:
+                    skipped_count += 1
+                    continue
+                incomplete_eras.append((era_number, url))
+            
+            print(f"📋 Skipping {skipped_count} completed eras, processing {len(incomplete_eras)} incomplete eras")
+            
+            if incomplete_eras:
+                first_incomplete = incomplete_eras[0][0]
+                last_incomplete = incomplete_eras[-1][0] if len(incomplete_eras) > 1 else first_incomplete
+                print(f"🚀 Will process eras {first_incomplete} to {last_incomplete}")
+            
+            return incomplete_eras
+            
+        except Exception as e:
+            print(f"⚠️  Era check failed: {e}")
+            import traceback
+            print(f"🔍 Error details: {traceback.format_exc()}")
+            print(f"📋 Falling back to processing all {len(available_eras)} eras")
+            return available_eras
+
     def process_era_range(self, start_era: int, end_era: Optional[int], 
                      command: str, base_output: str, separate_files: bool = False,
-                     resume: bool = False, export_type: str = "file",
+                     force: bool = False, export_type: str = "file",
                      processed_eras: set = None) -> Dict[str, Any]:
         """
-        Download and process a range of era files with enhanced state management
-        
-        Args:
-            start_era: Starting era number
-            end_era: Ending era number (None = until not found)
-            command: Processing command (all-blocks, transactions, etc.)
-            base_output: Base output filename
-            separate_files: Whether to create separate files per data type
-            resume: Whether to skip already processed eras
-            export_type: "file" or "clickhouse"
-            processed_eras: Set of already processed eras (for ClickHouse)
-            
-        Returns:
-            Processing summary
+        Download and process a range of era files with simplified state management
         """
         print(f"🚀 Starting remote era processing")
         print(f"   Range: {start_era} to {end_era or 'end'}")
         print(f"   Command: {command}")
-        print(f"   Output: {base_output}")
-        print(f"   Separate files: {separate_files}")
-        print(f"   Resume: {resume}")
+        print(f"   Force: {force}")
         print(f"   Export type: {export_type}")
         
-        # OPTIMIZED: Fast discovery of available eras
-        available_eras = self.discover_era_files(start_era, end_era)
+        # Get eras to process using simplified logic (removed resume parameter)
+        eras_to_process = self.get_eras_to_process(start_era, end_era, force)
         
-        if not available_eras:
-            print("❌ No era files found in the specified range")
+        if not eras_to_process:
+            print("❌ No era files to process")
             return {"success": False, "processed_count": 0, "failed_count": 0}
-        
-        # Filter out already processed eras if resuming
-        if resume:
-            processed_eras_file = set(self.progress_data.get("processed_eras", []))
-            available_eras = [(era, url) for era, url in available_eras if era not in processed_eras_file]
-            print(f"📋 Resume mode: {len(available_eras)} eras remaining after filtering file processed ones")
-        
-        # Filter out ClickHouse processed eras using era state manager
-        if export_type == "clickhouse":
-            try:
-                state_processed_eras = self.get_processed_eras_from_state(self.network, start_era, end_era)
-                available_eras = [(era, url) for era, url in available_eras if era not in state_processed_eras]
-                print(f"📋 Era state filter: {len(available_eras)} eras remaining after filtering state processed ones")
-            except Exception as e:
-                print(f"⚠️  Could not filter by era state: {e}")
-        elif processed_eras:  # Legacy filter for other export types
-            available_eras = [(era, url) for era, url in available_eras if era not in processed_eras]
-            print(f"📋 Legacy filter: {len(available_eras)} eras remaining")
         
         # Process each era
         processed_count = 0
@@ -686,9 +725,9 @@ class RemoteEraDownloader:
         # Import here to avoid circular dependencies
         from ..core import EraProcessor
         
-        for i, (era_number, url) in enumerate(available_eras, 1):
+        for i, (era_number, url) in enumerate(eras_to_process, 1):
             print(f"\n{'='*60}")
-            print(f"📈 Processing era {era_number} ({i}/{len(available_eras)})")
+            print(f"📈 Processing era {era_number} ({i}/{len(eras_to_process)})")
             print(f"{'='*60}")
             
             try:
@@ -716,25 +755,19 @@ class RemoteEraDownloader:
                 
                 if success:
                     processed_count += 1
-                    self.progress_data["processed_eras"].append(era_number)
                     print(f"✅ Successfully processed era {era_number}")
                 else:
                     failed_count += 1
                     failed_eras.append(era_number)
-                    self.progress_data["failed_eras"].append(era_number)
                     print(f"❌ Failed to process era {era_number}")
                 
                 # Cleanup downloaded file
                 self.cleanup_era(local_path)
                 
-                # Save progress periodically
-                self._save_progress()
-                
             except Exception as e:
                 print(f"❌ Error processing era {era_number}: {e}")
                 failed_count += 1
                 failed_eras.append(era_number)
-                self.progress_data["failed_eras"].append(era_number)
                 
                 # Try to cleanup on error
                 if 'local_path' in locals() and local_path:
@@ -744,25 +777,20 @@ class RemoteEraDownloader:
         print(f"\n{'='*60}")
         print(f"🎉 REMOTE PROCESSING COMPLETE!")
         print(f"{'='*60}")
-        print(f"✅ Successfully processed: {processed_count}/{len(available_eras)} eras")
+        print(f"✅ Successfully processed: {processed_count}/{len(eras_to_process)} eras")
         print(f"❌ Failed: {failed_count} eras")
         
         if failed_eras:
             print(f"❌ Failed eras: {failed_eras}")
         
-        # Save final progress
-        self._save_progress()
-        
-        summary = {
+        return {
             "success": True,
-            "total_eras": len(available_eras),
+            "total_eras": len(eras_to_process),
             "processed_count": processed_count,
             "failed_count": failed_count,
-            "failed_eras": failed_eras,
-            "progress_file": str(self.progress_file)
+            "failed_eras": failed_eras
         }
-        
-        return summary
+
 
     def _generate_era_output_filename(self, base_output: str, era_number: int) -> str:
         """Generate output filename for era"""
