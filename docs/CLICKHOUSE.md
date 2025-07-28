@@ -25,8 +25,8 @@ era-parser gnosis-02607.era all-blocks --export clickhouse
 # Process remote eras to ClickHouse
 era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse
 
-# Resume interrupted processing
-era-parser --remote gnosis 1082+ all-blocks --export clickhouse --resume
+# Process with force mode (clean and reprocess)
+era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse --force
 ```
 
 ## Database Schema
@@ -92,7 +92,7 @@ CREATE TABLE beacon_chain.execution_payloads (
 PARTITION BY toStartOfMonth(timestamp_utc)
 ORDER BY (slot, block_number);
 
--- Individual transactions
+-- Transaction hashes (Bellatrix+)
 CREATE TABLE beacon_chain.transactions (
     slot UInt64,
     block_number UInt64 DEFAULT 0,
@@ -107,7 +107,7 @@ CREATE TABLE beacon_chain.transactions (
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
 PARTITION BY toStartOfMonth(timestamp_utc)
-ORDER BY (slot, transaction_index, transaction_hash);
+ORDER BY (slot, transaction_index);
 
 -- Validator withdrawals (Capella+)
 CREATE TABLE beacon_chain.withdrawals (
@@ -141,104 +141,97 @@ CREATE TABLE beacon_chain.attestations (
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
 PARTITION BY toStartOfMonth(timestamp_utc)
-ORDER BY (slot, attestation_index, committee_index);
+ORDER BY (slot, attestation_index);
 
 -- Validator deposits
 CREATE TABLE beacon_chain.deposits (
     slot UInt64,
     deposit_index UInt64,
-    pubkey String DEFAULT '',
-    withdrawal_credentials String DEFAULT '',
-    amount UInt64 DEFAULT 0,
-    signature String DEFAULT '',
-    proof String DEFAULT '[]',
+    pubkey String,
+    withdrawal_credentials String,
+    amount UInt64,
+    signature String,
+    proof String,
     timestamp_utc DateTime DEFAULT toDateTime(0),
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
 PARTITION BY toStartOfMonth(timestamp_utc)
-ORDER BY (slot, deposit_index, pubkey);
+ORDER BY (slot, deposit_index);
 
 -- Voluntary exits
 CREATE TABLE beacon_chain.voluntary_exits (
     slot UInt64,
     exit_index UInt64,
-    signature String DEFAULT '',
-    epoch UInt64 DEFAULT 0,
-    validator_index UInt64 DEFAULT 0,
+    signature String,
+    epoch UInt64,
+    validator_index UInt64,
     timestamp_utc DateTime DEFAULT toDateTime(0),
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
 PARTITION BY toStartOfMonth(timestamp_utc)
-ORDER BY (slot, validator_index, epoch);
+ORDER BY (slot, exit_index, validator_index);
 
 -- Proposer slashings
 CREATE TABLE beacon_chain.proposer_slashings (
     slot UInt64,
     slashing_index UInt64,
-    header_1_slot UInt64 DEFAULT 0,
-    header_1_proposer_index UInt64 DEFAULT 0,
-    header_1_parent_root String DEFAULT '',
-    header_1_state_root String DEFAULT '',
-    header_1_body_root String DEFAULT '',
-    header_1_signature String DEFAULT '',
-    header_2_slot UInt64 DEFAULT 0,
-    header_2_proposer_index UInt64 DEFAULT 0,
-    header_2_parent_root String DEFAULT '',
-    header_2_state_root String DEFAULT '',
-    header_2_body_root String DEFAULT '',
-    header_2_signature String DEFAULT '',
+    header_1_slot UInt64,
+    header_1_proposer_index UInt64,
+    header_1_parent_root String,
+    header_1_state_root String,
+    header_1_body_root String,
+    header_1_signature String,
+    header_2_slot UInt64,
+    header_2_proposer_index UInt64,
+    header_2_parent_root String,
+    header_2_state_root String,
+    header_2_body_root String,
+    header_2_signature String,
     timestamp_utc DateTime DEFAULT toDateTime(0),
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
 PARTITION BY toStartOfMonth(timestamp_utc)
-ORDER BY (slot, slashing_index, header_1_proposer_index);
+ORDER BY (slot, slashing_index);
 
--- Attester slashings with full validator indices support
+-- Attester slashings with full data
 CREATE TABLE beacon_chain.attester_slashings (
     slot UInt64,
     slashing_index UInt64,
-    
-    -- Attestation 1 data
-    att_1_slot UInt64 DEFAULT 0,
-    att_1_committee_index UInt64 DEFAULT 0,
-    att_1_beacon_block_root String DEFAULT '',
-    att_1_source_epoch UInt64 DEFAULT 0,
-    att_1_source_root String DEFAULT '',
-    att_1_target_epoch UInt64 DEFAULT 0,
-    att_1_target_root String DEFAULT '',
-    att_1_signature String DEFAULT '',
-    att_1_attesting_indices String DEFAULT '[]',
-    att_1_validator_count UInt32 DEFAULT 0,
-    
-    -- Attestation 2 data  
-    att_2_slot UInt64 DEFAULT 0,
-    att_2_committee_index UInt64 DEFAULT 0,
-    att_2_beacon_block_root String DEFAULT '',
-    att_2_source_epoch UInt64 DEFAULT 0,
-    att_2_source_root String DEFAULT '',
-    att_2_target_epoch UInt64 DEFAULT 0,
-    att_2_target_root String DEFAULT '',
-    att_2_signature String DEFAULT '',
-    att_2_attesting_indices String DEFAULT '[]',
-    att_2_validator_count UInt32 DEFAULT 0,
-    
-    -- Metadata
+    att_1_slot UInt64,
+    att_1_committee_index UInt64,
+    att_1_beacon_block_root String,
+    att_1_source_epoch UInt64,
+    att_1_source_root String,
+    att_1_target_epoch UInt64,
+    att_1_target_root String,
+    att_1_signature String,
+    att_1_attesting_indices String,  -- JSON array
+    att_1_validator_count UInt64,
+    att_2_slot UInt64,
+    att_2_committee_index UInt64,
+    att_2_beacon_block_root String,
+    att_2_source_epoch UInt64,
+    att_2_source_root String,
+    att_2_target_epoch UInt64,
+    att_2_target_root String,
+    att_2_signature String,
+    att_2_attesting_indices String,  -- JSON array
+    att_2_validator_count UInt64,
+    total_slashed_validators UInt64,
     timestamp_utc DateTime DEFAULT toDateTime(0),
-    total_slashed_validators UInt32 DEFAULT 0,
-    
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
 PARTITION BY toStartOfMonth(timestamp_utc)
-ORDER BY (slot, slashing_index, att_1_committee_index);
+ORDER BY (slot, slashing_index);
 
 -- BLS to execution changes (Capella+)
 CREATE TABLE beacon_chain.bls_changes (
     slot UInt64,
     change_index UInt64,
-    signature String DEFAULT '',
-    validator_index UInt64 DEFAULT 0,
-    from_bls_pubkey String DEFAULT '',
-    to_execution_address String DEFAULT '',
+    validator_index UInt64,
+    from_bls_pubkey String,
+    to_execution_address String,
+    signature String,
     timestamp_utc DateTime DEFAULT toDateTime(0),
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
@@ -246,10 +239,10 @@ PARTITION BY toStartOfMonth(timestamp_utc)
 ORDER BY (slot, change_index, validator_index);
 
 -- Blob KZG commitments (Deneb+)
-CREATE TABLE beacon_chain.blob_commitments (
+CREATE TABLE beacon_chain.blob_kzg_commitments (
     slot UInt64,
     commitment_index UInt64,
-    commitment String DEFAULT '',
+    commitment String,
     timestamp_utc DateTime DEFAULT toDateTime(0),
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
@@ -259,220 +252,144 @@ ORDER BY (slot, commitment_index);
 -- Execution requests (Electra+)
 CREATE TABLE beacon_chain.execution_requests (
     slot UInt64,
-    request_type String,
     request_index UInt64,
-    pubkey String DEFAULT '',
-    withdrawal_credentials String DEFAULT '',
-    amount UInt64 DEFAULT 0,
-    signature String DEFAULT '',
-    deposit_request_index UInt64 DEFAULT 0,
-    source_address String DEFAULT '',
-    validator_pubkey String DEFAULT '',
-    source_pubkey String DEFAULT '',
-    target_pubkey String DEFAULT '',
+    request_type String,
+    request_data String,
     timestamp_utc DateTime DEFAULT toDateTime(0),
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
 PARTITION BY toStartOfMonth(timestamp_utc)
-ORDER BY (slot, request_type, request_index);
-```
+ORDER BY (slot, request_index);
 
-### State Management Tables
-
-Era Parser includes sophisticated state tracking:
-
-```sql
--- Granular processing state per era and dataset
-CREATE TABLE beacon_chain.era_processing_state (
-    era_filename String,
+-- Era processing state tracking
+CREATE TABLE beacon_chain.era_completion (
     network String,
     era_number UInt32,
-    dataset String,
-    status String,
-    worker_id String DEFAULT '',
-    attempt_count UInt8 DEFAULT 0,
-    created_at DateTime DEFAULT now(),
-    completed_at Nullable(DateTime),
-    rows_inserted Nullable(UInt64),
-    file_hash String DEFAULT '',
-    error_message Nullable(String),
-    processing_duration_ms Nullable(UInt64),
-    insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9)),
-    
-    INDEX idx_status (status) TYPE minmax GRANULARITY 4,
-    INDEX idx_network_dataset (network, dataset) TYPE minmax GRANULARITY 4,
-    INDEX idx_era_number (era_number) TYPE minmax GRANULARITY 4
+    status Enum('processing', 'completed', 'failed'),
+    slot_start UInt64,
+    slot_end UInt64,
+    total_records UInt64,
+    datasets_processed Array(String),
+    processing_started_at DateTime,
+    completed_at DateTime,
+    error_message String,
+    retry_count UInt8,
+    insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
-PARTITION BY (network, toYYYYMM(created_at))
-ORDER BY (era_filename, dataset)
-SETTINGS index_granularity = 8192;
-
--- Era-level progress view
-CREATE VIEW beacon_chain.era_processing_progress AS
-SELECT 
-    network,
-    era_filename,
-    era_number,
-    countIf(status = 'completed') as completed_datasets,
-    countIf(status = 'processing') as processing_datasets,
-    countIf(status = 'failed') as failed_datasets,
-    countIf(status = 'pending') as pending_datasets,
-    count(*) as total_datasets,
-    sum(rows_inserted) as total_rows_inserted,
-    maxIf(completed_at, status = 'completed') as last_completed_at
-FROM beacon_chain.era_processing_state
-GROUP BY network, era_filename, era_number;
-
--- Dataset-level progress view
-CREATE VIEW beacon_chain.dataset_processing_progress AS
-SELECT
-    network,
-    dataset,
-    countIf(status = 'completed') as completed_eras,
-    countIf(status = 'processing') as processing_eras,
-    countIf(status = 'failed') as failed_eras,
-    countIf(status = 'pending') as pending_eras,
-    count(*) as total_eras,
-    sum(rows_inserted) as total_rows_inserted,
-    maxIf(era_number, status = 'completed') as highest_completed_era
-FROM beacon_chain.era_processing_state
-GROUP BY network, dataset;
+ORDER BY (network, era_number);
 ```
 
-## Key Features
+## Processing Modes
 
-### Granular State Management
-Era Parser tracks processing at the dataset level, enabling:
-- **Smart Resume**: Only processes missing datasets
-- **Parallel Processing**: Multiple workers can process different datasets
-- **Error Handling**: Failed datasets don't block others
-- **Progress Monitoring**: Detailed visibility into processing status
-
-### Optimized Performance
-- **Streaming Inserts**: Memory-efficient processing of large era files
-- **Batch Processing**: Adaptive batch sizes for optimal throughput
-- **Connection Resilience**: Automatic reconnection and retry logic
-- **Cloud Optimization**: Settings tuned for ClickHouse Cloud
-
-### Time-Based Partitioning
-All tables are partitioned by `toStartOfMonth(timestamp_utc)` for:
-- **Efficient Queries**: Time-range queries use partition pruning
-- **Maintenance**: Easy to drop old data or manage storage
-- **Performance**: Reduced query times on time-series data
-
-## Configuration Options
-
-### Connection Settings
+### Normal Mode (Default)
+Processes all specified eras:
 ```bash
-# Basic connection (required)
-CLICKHOUSE_HOST=your-host.com
-CLICKHOUSE_PASSWORD=your-password
-
-# Advanced settings (optional)
-CLICKHOUSE_PORT=8443                    # Default: 8443
-CLICKHOUSE_USER=default                 # Default: default
-CLICKHOUSE_DATABASE=beacon_chain        # Default: beacon_chain
-CLICKHOUSE_SECURE=true                  # Default: true
-
-# Performance tuning
-ERA_CLEANUP_AFTER_PROCESS=true          # Delete era files after processing
-ERA_MAX_RETRIES=3                       # Retry attempts for failed operations
+era-parser --remote gnosis 1000-1100 all-blocks --export clickhouse
 ```
 
-### Docker Configuration
-```yaml
-# docker-compose.yml
-services:
-  era-parser:
-    image: era-parser:latest
-    environment:
-      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST}
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
-      - CLICKHOUSE_DATABASE=beacon_chain
-    volumes:
-      - ./era-files:/app/era-files:ro
-      - ./output:/app/output
+### Force Mode
+Cleans existing data first, then reprocesses everything:
+```bash
+era-parser --remote gnosis 1000-1100 all-blocks --export clickhouse --force
 ```
 
-## Common Queries
+**Force Mode Process:**
+1. Identifies eras with existing data
+2. Cleans all data for those eras from all tables
+3. Removes completion records  
+4. Processes all eras from scratch
+
+**Force Mode Use Cases:**
+- Data corruption recovery
+- Schema changes requiring reprocessing
+- Testing with clean state
+- Regenerating specific data ranges
+
+## Era Completion Tracking
+
+Monitor processing status with the `era_completion` table:
+
+```sql
+-- Check completion status
+SELECT 
+    status,
+    count() as era_count,
+    sum(total_records) as total_records
+FROM era_completion 
+WHERE network = 'gnosis'
+GROUP BY status;
+
+-- Recent processing activity
+SELECT 
+    era_number,
+    status,
+    total_records,
+    completed_at,
+    error_message
+FROM era_completion 
+WHERE network = 'gnosis' 
+  AND processing_started_at >= now() - INTERVAL 1 DAY
+ORDER BY era_number DESC;
+
+-- Failed eras needing attention
+SELECT 
+    era_number,
+    retry_count,
+    error_message,
+    completed_at
+FROM era_completion 
+WHERE network = 'gnosis' 
+  AND status = 'failed'
+ORDER BY era_number;
+```
+
+## Data Analysis Examples
 
 ### Block Analysis
 ```sql
--- Block production over time
-SELECT 
-    toStartOfHour(timestamp_utc) as hour,
-    count() as blocks_produced,
-    count(DISTINCT proposer_index) as unique_proposers
-FROM blocks 
-WHERE timestamp_utc >= now() - INTERVAL 1 DAY
-GROUP BY hour
-ORDER BY hour;
-
--- Top block proposers
+-- Block production statistics
 SELECT 
     proposer_index,
     count() as blocks_proposed,
+    avg(attestation_count) as avg_attestations,
     min(timestamp_utc) as first_block,
     max(timestamp_utc) as last_block
 FROM blocks 
 WHERE timestamp_utc >= now() - INTERVAL 7 DAY
 GROUP BY proposer_index
 ORDER BY blocks_proposed DESC
-LIMIT 10;
+LIMIT 20;
 
--- Block production patterns by day of week
+-- Block timing analysis
 SELECT 
-    toDayOfWeek(timestamp_utc) as day_of_week,
-    count() as blocks_produced,
-    avg(blocks_produced) OVER () as avg_daily_blocks
+    toStartOfHour(timestamp_utc) as hour,
+    count() as block_count,
+    avg(attestation_count) as avg_attestations,
+    avg(deposit_count) as avg_deposits
 FROM blocks 
-WHERE timestamp_utc >= now() - INTERVAL 30 DAY
-GROUP BY day_of_week
-ORDER BY day_of_week;
+WHERE timestamp_utc >= now() - INTERVAL 24 HOUR
+GROUP BY hour
+ORDER BY hour;
 
--- Missed slots analysis
-WITH slot_range AS (
-    SELECT min(slot) as min_slot, max(slot) as max_slot
-    FROM blocks 
-    WHERE timestamp_utc >= now() - INTERVAL 1 DAY
-),
-expected_slots AS (
-    SELECT number as expected_slot
-    FROM numbers((SELECT max_slot - min_slot + 1 FROM slot_range))
-    SETTINGS max_block_size = 100000
-),
-actual_slots AS (
-    SELECT slot FROM blocks 
-    WHERE timestamp_utc >= now() - INTERVAL 1 DAY
-)
+-- Missing slots analysis
 SELECT 
-    count() as missed_slots,
-    (SELECT count() FROM actual_slots) as produced_slots,
-    round((count() * 100.0) / (count() + (SELECT count() FROM actual_slots)), 2) as miss_rate_percent
-FROM expected_slots e
-LEFT JOIN actual_slots a ON e.expected_slot + (SELECT min_slot FROM slot_range) = a.slot
-WHERE a.slot IS NULL;
+    slot,
+    slot - lag(slot) OVER (ORDER BY slot) - 1 as missing_slots
+FROM blocks 
+WHERE timestamp_utc >= now() - INTERVAL 1 DAY
+  AND missing_slots > 0
+ORDER BY missing_slots DESC;
 ```
 
-### Transaction Analysis
+### Transaction Analysis  
 ```sql
--- Transaction volume over time
-SELECT 
-    toStartOfDay(timestamp_utc) as day,
-    count() as transaction_count,
-    count(DISTINCT block_hash) as blocks_with_txs,
-    round(count() / count(DISTINCT block_hash), 2) as avg_txs_per_block
-FROM transactions 
-WHERE timestamp_utc >= now() - INTERVAL 30 DAY
-GROUP BY day
-ORDER BY day;
-
--- Fee recipient analysis
+-- Transaction volume by fee recipient
 SELECT 
     fee_recipient,
     count() as transactions,
-    count(DISTINCT block_hash) as blocks,
-    round(count() / count(DISTINCT block_hash), 2) as avg_txs_per_block
+    count() / (SELECT count() FROM transactions WHERE timestamp_utc >= now() - INTERVAL 1 DAY) * 100 as percentage,
+    avg(gas_limit) as avg_gas_limit,
+    avg(gas_used) as avg_gas_used
 FROM transactions 
 WHERE timestamp_utc >= now() - INTERVAL 1 DAY
 GROUP BY fee_recipient
@@ -675,107 +592,43 @@ WHERE timestamp_utc >= now() - INTERVAL 30 DAY
 GROUP BY day
 ORDER BY day;
 
--- Most active addresses for BLS changes
+-- Top validators by BLS changes
 SELECT 
-    to_execution_address,
+    validator_index,
     count() as change_count,
-    count(DISTINCT validator_index) as unique_validators
+    groupArray(to_execution_address) as execution_addresses,
+    min(timestamp_utc) as first_change,
+    max(timestamp_utc) as last_change
 FROM bls_changes 
 WHERE timestamp_utc >= now() - INTERVAL 30 DAY
-GROUP BY to_execution_address
-ORDER BY change_count DESC
-LIMIT 20;
+GROUP BY validator_index
+HAVING change_count > 1
+ORDER BY change_count DESC;
 ```
 
 ### Blob Analysis (Deneb+)
 ```sql
 -- Blob commitment patterns
 SELECT 
-    toStartOfDay(timestamp_utc) as day,
-    count() as commitment_count,
-    count(DISTINCT slot) as slots_with_blobs,
-    round(count() / count(DISTINCT slot), 2) as avg_commitments_per_slot
-FROM blob_commitments 
-WHERE timestamp_utc >= now() - INTERVAL 7 DAY
-GROUP BY day
-ORDER BY day;
-
--- Blob gas usage
-SELECT 
     toStartOfHour(timestamp_utc) as hour,
-    avg(blob_gas_used) as avg_blob_gas,
-    max(blob_gas_used) as max_blob_gas,
-    avg(excess_blob_gas) as avg_excess_blob_gas,
-    count() as blocks_with_blobs
-FROM execution_payloads 
-WHERE timestamp_utc >= now() - INTERVAL 1 DAY
-  AND blob_gas_used > 0
+    count() as total_commitments,
+    count(DISTINCT slot) as blocks_with_blobs,
+    avg(count()) OVER () as avg_hourly_commitments
+FROM blob_kzg_commitments 
+WHERE timestamp_utc >= now() - INTERVAL 24 HOUR
 GROUP BY hour
 ORDER BY hour;
-```
 
-### State Management Queries
-```sql
--- Processing status overview
+-- Blocks with most blob commitments
 SELECT 
-    network,
-    count(DISTINCT era_number) as total_eras,
-    countIf(completed_datasets = total_datasets) as fully_completed,
-    countIf(processing_datasets > 0) as currently_processing,
-    sum(total_rows_inserted) as total_rows
-FROM era_processing_progress
-GROUP BY network;
-
--- Failed processing attempts
-SELECT 
-    era_filename,
-    dataset,
-    error_message,
-    attempt_count,
-    created_at
-FROM era_processing_state
-WHERE status = 'failed'
-ORDER BY created_at DESC
+    slot,
+    count() as commitment_count,
+    timestamp_utc
+FROM blob_kzg_commitments 
+WHERE timestamp_utc >= now() - INTERVAL 7 DAY
+GROUP BY slot, timestamp_utc
+ORDER BY commitment_count DESC
 LIMIT 20;
-
--- Dataset completion status
-SELECT 
-    network,
-    dataset,
-    completed_eras,
-    failed_eras,
-    total_rows_inserted,
-    highest_completed_era
-FROM dataset_processing_progress
-WHERE network = 'gnosis'
-ORDER BY dataset;
-
--- Processing performance metrics
-SELECT 
-    dataset,
-    avg(processing_duration_ms) as avg_duration_ms,
-    min(processing_duration_ms) as min_duration_ms,
-    max(processing_duration_ms) as max_duration_ms,
-    avg(rows_inserted) as avg_rows_per_era,
-    count() as completed_eras
-FROM era_processing_state
-WHERE status = 'completed'
-  AND processing_duration_ms IS NOT NULL
-  AND rows_inserted IS NOT NULL
-GROUP BY dataset
-ORDER BY avg_duration_ms DESC;
-
--- Recent processing activity
-SELECT 
-    toStartOfHour(created_at) as hour,
-    count() as processing_attempts,
-    countIf(status = 'completed') as completed,
-    countIf(status = 'failed') as failed,
-    sum(rows_inserted) as total_rows
-FROM era_processing_state
-WHERE created_at >= now() - INTERVAL 24 HOUR
-GROUP BY hour
-ORDER BY hour;
 ```
 
 ## Performance Optimization
@@ -868,32 +721,41 @@ ORDER BY total_rows DESC;
 SELECT 
     table,
     max(timestamp_utc) as latest_data,
-    count() as recent_records,
-    now() - max(timestamp_utc) as data_lag
+    count() as rows_today
 FROM (
-    SELECT 'blocks' as table, timestamp_utc FROM blocks WHERE timestamp_utc >= now() - INTERVAL 1 HOUR
+    SELECT 'blocks' as table, timestamp_utc FROM blocks WHERE timestamp_utc >= today()
     UNION ALL
-    SELECT 'transactions' as table, timestamp_utc FROM transactions WHERE timestamp_utc >= now() - INTERVAL 1 HOUR
+    SELECT 'transactions' as table, timestamp_utc FROM transactions WHERE timestamp_utc >= today()
     UNION ALL
-    SELECT 'attestations' as table, timestamp_utc FROM attestations WHERE timestamp_utc >= now() - INTERVAL 1 HOUR
+    SELECT 'attestations' as table, timestamp_utc FROM attestations WHERE timestamp_utc >= today()
     UNION ALL
-    SELECT 'withdrawals' as table, timestamp_utc FROM withdrawals WHERE timestamp_utc >= now() - INTERVAL 1 HOUR
+    SELECT 'withdrawals' as table, timestamp_utc FROM withdrawals WHERE timestamp_utc >= today()
     UNION ALL
-    SELECT 'attester_slashings' as table, timestamp_utc FROM attester_slashings WHERE timestamp_utc >= now() - INTERVAL 1 HOUR
-)
+    SELECT 'attester_slashings' as table, timestamp_utc FROM attester_slashings WHERE timestamp_utc >= today()
+) 
 GROUP BY table
 ORDER BY table;
+
+-- Processing performance
+SELECT 
+    toStartOfHour(completed_at) as hour,
+    count() as eras_completed,
+    avg(retry_count) as avg_retries,
+    countIf(status = 'failed') as failed,
+    sum(total_records) as total_rows
+FROM era_completion
+WHERE completed_at >= now() - INTERVAL 24 HOUR
+GROUP BY hour
+ORDER BY hour;
 
 -- Processing lag detection
 SELECT 
     network,
-    dataset,
-    highest_completed_era,
+    max(era_number) as highest_completed_era,
     now() - max(completed_at) as time_since_last_completion
-FROM dataset_processing_progress dp
-JOIN era_processing_state eps ON dp.network = eps.network AND dp.dataset = eps.dataset
-WHERE eps.status = 'completed'
-GROUP BY network, dataset, highest_completed_era
+FROM era_completion
+WHERE status = 'completed'
+GROUP BY network
 HAVING time_since_last_completion > INTERVAL 1 HOUR;
 
 -- Check for data quality issues
@@ -994,9 +856,9 @@ ALTER TABLE attestations DROP PARTITION '202301';
 ALTER TABLE attester_slashings DROP PARTITION '202301';
 
 -- Clean up failed processing attempts older than 7 days
-ALTER TABLE era_processing_state DELETE 
+DELETE FROM era_completion
 WHERE status = 'failed' 
-  AND created_at < now() - INTERVAL 7 DAY;
+  AND completed_at < now() - INTERVAL 7 DAY;
 
 -- Remove duplicate entries (if any)
 OPTIMIZE TABLE blocks FINAL;
@@ -1074,385 +936,120 @@ SELECT
     query,
     query_duration_ms,
     read_rows,
-    read_bytes,
-    memory_usage,
-    formatReadableSize(memory_usage) as memory_readable
+    formatReadableSize(read_bytes) as read_bytes,
+    formatReadableSize(memory_usage) as memory_usage
 FROM system.query_log 
-WHERE query_duration_ms > 10000  -- > 10 seconds
-  AND event_time >= now() - INTERVAL 1 HOUR
-ORDER BY query_duration_ms DESC 
+WHERE event_time >= now() - INTERVAL 1 HOUR
+  AND query_duration_ms > 10000  -- > 10 seconds
+ORDER BY query_duration_ms DESC
 LIMIT 10;
 
--- Check for queries with high memory usage
-SELECT 
-    query,
-    memory_usage,
-    formatReadableSize(memory_usage) as memory_readable,
-    query_duration_ms
-FROM system.query_log 
-WHERE memory_usage > 5000000000  -- > 5GB
-  AND event_time >= now() - INTERVAL 1 HOUR
-ORDER BY memory_usage DESC 
-LIMIT 10;
+-- Query optimization recommendations
+EXPLAIN SYNTAX 
+SELECT * FROM blocks WHERE timestamp_utc >= now() - INTERVAL 1 DAY;
+
+-- Check if indexes are being used
+EXPLAIN indexes = 1
+SELECT * FROM blocks WHERE proposer_index = 12345;
 ```
 
-**Data Inconsistency**:
+**Data Inconsistencies**:
 ```sql
--- Check for missing data relationships
+-- Check for missing data
 SELECT 
-    b.slot,
-    b.timestamp_utc,
-    CASE WHEN ep.slot IS NULL THEN 'Missing execution_payload' ELSE 'OK' END as execution_status,
-    CASE WHEN sa.slot IS NULL THEN 'Missing sync_aggregate' ELSE 'OK' END as sync_status
+    'Missing execution payloads' as issue,
+    count() as missing_count
 FROM blocks b
 LEFT JOIN execution_payloads ep ON b.slot = ep.slot
-LEFT JOIN sync_aggregates sa ON b.slot = sa.slot
-WHERE b.timestamp_utc >= now() - INTERVAL 1 DAY
-  AND (ep.slot IS NULL OR sa.slot IS NULL)
-ORDER BY b.slot DESC
-LIMIT 100;
+WHERE ep.slot IS NULL 
+  AND b.timestamp_utc >= toDateTime('2022-09-15');  -- Post-merge only
+
+-- Verify slot continuity
+SELECT 
+    slot,
+    prev_slot,
+    slot - prev_slot as gap
+FROM (
+    SELECT 
+        slot,
+        lag(slot) OVER (ORDER BY slot) as prev_slot
+    FROM blocks 
+    WHERE timestamp_utc >= now() - INTERVAL 1 DAY
+)
+WHERE gap > 1
+ORDER BY gap DESC;
+```
+
+## Production Tips
+
+### Data Pipeline Setup
+```bash
+# Initial historical load with force mode
+era-parser --remote gnosis 0-2000 all-blocks --export clickhouse --force
+
+# Incremental processing (normal mode)
+era-parser --remote gnosis 2001+ all-blocks --export clickhouse
+
+# Recovery from failures
+era-parser --era-failed gnosis  # Check failures
+era-parser --remote gnosis <failed-range> all-blocks --export clickhouse --force
+```
+
+### Monitoring Script
+```bash
+#!/bin/bash
+# Check for failed eras and alert
+failed_count=$(clickhouse-client --query "SELECT count() FROM era_completion WHERE status = 'failed'")
+if [ "$failed_count" -gt 0 ]; then
+    echo "WARNING: $failed_count failed eras detected"
+    # Send alert
+fi
+
+# Check data freshness
+latest_block=$(clickhouse-client --query "SELECT max(timestamp_utc) FROM blocks")
+current_time=$(date +%s)
+latest_block_ts=$(date -d "$latest_block" +%s)
+lag_minutes=$(( (current_time - latest_block_ts) / 60 ))
+
+if [ "$lag_minutes" -gt 60 ]; then
+    echo "WARNING: Data is $lag_minutes minutes behind"
+    # Send alert
+fi
+```
+
+### Backup Strategy
+```sql
+-- Backup critical tables
+BACKUP TABLE beacon_chain.era_completion TO S3('s3://backup-bucket/era_completion/');
+BACKUP TABLE beacon_chain.blocks TO S3('s3://backup-bucket/blocks/');
+
+-- Incremental backup
+BACKUP TABLE beacon_chain.blocks 
+WHERE timestamp_utc >= today() - INTERVAL 1 DAY
+TO S3('s3://backup-bucket/blocks_incremental/');
 ```
 
 ### Performance Tuning
-
-**ClickHouse Settings**:
 ```sql
--- Optimize for Era Parser workloads
-SET max_memory_usage = 10000000000; -- 10GB
-SET max_threads = 8;
-SET max_insert_block_size = 100000;
-SET insert_quorum = 0;
-SET insert_quorum_timeout = 0;
-SET send_timeout = 300;
-SET receive_timeout = 300;
-```
+-- Optimize tables regularly
+OPTIMIZE TABLE blocks FINAL;
+OPTIMIZE TABLE transactions FINAL;
+OPTIMIZE TABLE attestations FINAL;
 
-**Connection Pool Settings**:
-```python
-# Era Parser automatically uses optimized settings
-settings = {
-    'max_insert_block_size': 100000,
-    'insert_quorum': 0,
-    'async_insert': 0,
-    'max_execution_time': 300,
-    'max_memory_usage': 10000000000,  # 10GB
-}
-```
-
-## Advanced Features
-
-### Custom Materialized Views
-```sql
--- Hourly block statistics
-CREATE MATERIALIZED VIEW beacon_chain.blocks_hourly_stats
-ENGINE = SummingMergeTree()
-ORDER BY (network, hour, proposer_index)
-AS SELECT
-    'gnosis' as network,
-    toStartOfHour(timestamp_utc) as hour,
-    proposer_index,
-    count() as blocks_proposed,
-    1 as total_blocks
-FROM beacon_chain.blocks
-GROUP BY hour, proposer_index;
-
--- Daily withdrawal summary
-CREATE MATERIALIZED VIEW beacon_chain.withdrawals_daily_summary
-ENGINE = SummingMergeTree()
-ORDER BY (day, validator_index)
-AS SELECT
-    toDate(timestamp_utc) as day,
-    validator_index,
-    count() as withdrawal_count,
-    sum(amount) as total_amount_gwei
-FROM beacon_chain.withdrawals
-GROUP BY day, validator_index;
-
--- Validator performance metrics
-CREATE MATERIALIZED VIEW beacon_chain.validator_performance_daily
-ENGINE = ReplacingMergeTree()
-ORDER BY (day, validator_index)
-AS SELECT
-    toDate(b.timestamp_utc) as day,
-    b.proposer_index as validator_index,
-    count() as blocks_proposed,
-    avg(ep.gas_used) as avg_gas_used,
-    sum(ep.transactions_count) as total_transactions,
-    avg(ep.transactions_count) as avg_transactions
-FROM beacon_chain.blocks b
-LEFT JOIN beacon_chain.execution_payloads ep ON b.slot = ep.slot
-GROUP BY day, validator_index;
-
--- Daily slashing summary
-CREATE MATERIALIZED VIEW beacon_chain.slashing_daily_summary
-ENGINE = SummingMergeTree()
-ORDER BY (day, slashing_type)
-AS SELECT
-    toDate(timestamp_utc) as day,
-    'attester' as slashing_type,
-    count() as slashing_events,
-    sum(total_slashed_validators) as total_validators_slashed
-FROM beacon_chain.attester_slashings
-GROUP BY day
-UNION ALL
-SELECT
-    toDate(timestamp_utc) as day,
-    'proposer' as slashing_type,
-    count() as slashing_events,
-    count() as total_validators_slashed  -- Each proposer slashing affects 1 validator
-FROM beacon_chain.proposer_slashings
-GROUP BY day;
-```
-
-### Data Export
-```sql
--- Export to files for external analysis
+-- Monitor partition sizes
 SELECT 
-    slot,
-    proposer_index,
-    timestamp_utc,
-    gas_used,
-    transactions_count
-FROM blocks b
-JOIN execution_payloads ep ON b.slot = ep.slot
-WHERE timestamp_utc >= '2024-01-01'
-  AND timestamp_utc < '2024-02-01'
-FORMAT CSVWithNames
-INTO OUTFILE '/tmp/blocks_january_2024.csv';
+    table,
+    partition,
+    formatReadableSize(bytes_on_disk) as size
+FROM system.parts 
+WHERE database = 'beacon_chain'
+  AND bytes_on_disk > 1000000000  -- > 1GB
+ORDER BY bytes_on_disk DESC;
 
--- Export validator performance data
-SELECT 
-    validator_index,
-    day,
-    blocks_proposed,
-    total_transactions,
-    avg_gas_used
-FROM validator_performance_daily
-WHERE day >= '2024-01-01'
-FORMAT Parquet
-INTO OUTFILE '/tmp/validator_performance_2024.parquet';
-
--- Export attester slashing details with validator indices
-SELECT 
-    slot,
-    total_slashed_validators,
-    att_1_attesting_indices,
-    att_2_attesting_indices,
-    timestamp_utc
-FROM attester_slashings
-WHERE timestamp_utc >= '2024-01-01'
-FORMAT JSONEachRow
-INTO OUTFILE '/tmp/attester_slashings_2024.jsonl';
+-- Adjust merge settings for high-volume tables
+ALTER TABLE blocks MODIFY SETTING max_bytes_to_merge_at_max_space_in_pool = 161061273600;
 ```
 
-### Integration with Other Tools
+---
 
-**Grafana Dashboard Queries**:
-```sql
--- Block production rate over time
-SELECT 
-    $__timeGroup(timestamp_utc, $__interval) as time,
-    count() as blocks_per_interval
-FROM blocks 
-WHERE $__timeFilter(timestamp_utc)
-GROUP BY time
-ORDER BY time;
-
--- Transaction volume
-SELECT 
-    $__timeGroup(timestamp_utc, $__interval) as time,
-    count() as transaction_count
-FROM transactions 
-WHERE $__timeFilter(timestamp_utc)
-GROUP BY time
-ORDER BY time;
-
--- Gas utilization
-SELECT 
-    $__timeGroup(timestamp_utc, $__interval) as time,
-    avg(gas_used * 100.0 / gas_limit) as avg_gas_utilization
-FROM execution_payloads 
-WHERE $__timeFilter(timestamp_utc)
-  AND gas_limit > 0
-GROUP BY time
-ORDER BY time;
-
--- Slashing events over time
-SELECT 
-    $__timeGroup(timestamp_utc, $__interval) as time,
-    count() as attester_slashings,
-    sum(total_slashed_validators) as total_validators_slashed
-FROM attester_slashings 
-WHERE $__timeFilter(timestamp_utc)
-GROUP BY time
-ORDER BY time;
-```
-
-**Jupyter Notebook Integration**:
-```python
-import clickhouse_connect
-import pandas as pd
-import matplotlib.pyplot as plt
-import json
-
-# Connect to ClickHouse
-client = clickhouse_connect.get_client(
-    host='your-host.com',
-    password='your-password',
-    database='beacon_chain'
-)
-
-# Query recent blocks with gas data
-df = client.query_df("""
-    SELECT 
-        b.slot, 
-        b.proposer_index, 
-        b.timestamp_utc, 
-        ep.gas_used,
-        ep.gas_limit,
-        ep.transactions_count
-    FROM blocks b
-    JOIN execution_payloads ep ON b.slot = ep.slot
-    WHERE b.timestamp_utc >= now() - INTERVAL 1 DAY
-    ORDER BY b.slot
-""")
-
-# Plot gas utilization over time
-df['gas_utilization'] = (df['gas_used'] / df['gas_limit']) * 100
-df['timestamp_utc'] = pd.to_datetime(df['timestamp_utc'])
-
-plt.figure(figsize=(12, 6))
-plt.plot(df['timestamp_utc'], df['gas_utilization'])
-plt.title('Gas Utilization Over Time')
-plt.xlabel('Time')
-plt.ylabel('Gas Utilization (%)')
-plt.show()
-
-# Analyze attester slashing data
-slashing_df = client.query_df("""
-    SELECT 
-        slot,
-        total_slashed_validators,
-        att_1_attesting_indices,
-        att_2_attesting_indices,
-        timestamp_utc
-    FROM attester_slashings
-    WHERE timestamp_utc >= now() - INTERVAL 30 DAY
-""")
-
-# Parse JSON validator indices
-def parse_indices(indices_json):
-    try:
-        return json.loads(indices_json)
-    except:
-        return []
-
-slashing_df['att_1_indices'] = slashing_df['att_1_attesting_indices'].apply(parse_indices)
-slashing_df['att_2_indices'] = slashing_df['att_2_attesting_indices'].apply(parse_indices)
-
-# Analyze validator overlap in slashings
-overlaps = []
-for _, row in slashing_df.iterrows():
-    att_1_set = set(row['att_1_indices'])
-    att_2_set = set(row['att_2_indices'])
-    overlap = len(att_1_set.intersection(att_2_set))
-    overlaps.append(overlap)
-
-slashing_df['validator_overlap'] = overlaps
-
-print("Attester Slashing Analysis:")
-print(f"Total slashing events: {len(slashing_df)}")
-print(f"Total validators slashed: {slashing_df['total_slashed_validators'].sum()}")
-print(f"Average validators per slashing: {slashing_df['total_slashed_validators'].mean():.2f}")
-print(f"Average validator overlap: {slashing_df['validator_overlap'].mean():.2f}")
-```
-
-## Best Practices
-
-### Data Loading
-1. **Use Remote Processing**: More efficient than local file processing
-2. **Enable Resume**: Prevents reprocessing on interruption
-3. **Monitor State**: Check processing status regularly with `era-parser --era-status`
-4. **Batch Appropriately**: Let Era Parser handle batch sizing automatically
-
-### Query Patterns
-1. **Use Time Partitions**: Always include time filters when possible
-2. **Leverage Indexes**: Use indexed columns in WHERE clauses
-3. **Join Efficiently**: Join on slot for best performance between tables
-4. **Aggregate Wisely**: Use materialized views for frequently computed aggregations
-
-### Maintenance
-1. **Monitor Disk Usage**: ClickHouse can grow quickly with beacon chain data
-2. **Clean Up Failures**: Regularly clean failed processing attempts
-3. **Optimize Tables**: Run OPTIMIZE after large deletes or schema changes
-4. **Backup State**: Era processing state is valuable for resume capability
-
-### Security
-1. **Use Secure Connections**: Always set CLICKHOUSE_SECURE=true for production
-2. **Rotate Passwords**: Regularly update database credentials
-3. **Limit Access**: Use dedicated database users with minimal required permissions
-4. **Monitor Access**: Track queries and connection attempts in system logs
-
-## Migration and Upgrades
-
-### Schema Updates
-When Era Parser adds new fields or tables:
-
-```sql
--- Check current schema version
-SHOW TABLES FROM beacon_chain;
-
--- Add new columns (example for future fork)
-ALTER TABLE blocks ADD COLUMN new_fork_field String DEFAULT '';
-
--- Update existing data if needed
-ALTER TABLE blocks UPDATE new_fork_field = 'default_value' WHERE new_fork_field = '';
-
--- Create new tables for new data types
-CREATE TABLE beacon_chain.new_data_type (
-    slot UInt64,
-    new_field String,
-    timestamp_utc DateTime,
-    insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
-) ENGINE = ReplacingMergeTree(insert_version)
-PARTITION BY toStartOfMonth(timestamp_utc)
-ORDER BY (slot);
-```
-
-### Data Migration
-```sql
--- Migrate data between clusters or databases
-INSERT INTO new_cluster.beacon_chain.blocks 
-SELECT * FROM beacon_chain.blocks 
-WHERE timestamp_utc >= '2024-01-01';
-
--- Migrate specific time ranges
-INSERT INTO backup_database.blocks
-SELECT * FROM blocks
-WHERE timestamp_utc >= '2023-01-01' 
-  AND timestamp_utc < '2024-01-01';
-
--- Verify migration
-SELECT 
-    count() as total_rows,
-    min(timestamp_utc) as earliest,
-    max(timestamp_utc) as latest
-FROM backup_database.blocks;
-```
-
-### Backup Strategies
-```sql
--- Create backup tables
-CREATE TABLE beacon_chain.blocks_backup AS beacon_chain.blocks;
-
--- Export critical data
-SELECT * FROM era_processing_state 
-WHERE network = 'gnosis' 
-FORMAT Native 
-INTO OUTFILE '/backup/era_processing_state_gnosis.native';
-
--- Restore from backup
-INSERT INTO era_processing_state 
-FROM INFILE '/backup/era_processing_state_gnosis.native' 
-FORMAT Native;
-```
+For more details on era file formats and parsing, see [ERA_FILE_FORMAT.md](ERA_FILE_FORMAT.md) and [PARSED_FIELDS.md](PARSED_FIELDS.md).

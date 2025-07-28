@@ -60,8 +60,8 @@ export CLICKHOUSE_PASSWORD=your-password
 # Process era range to ClickHouse
 era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse
 
-# Process with intelligent resume capability
-era-parser --remote gnosis 1082+ all-blocks --export clickhouse --resume
+# Force reprocess with data cleanup
+era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse --force
 
 # Download without processing
 era-parser --remote gnosis 1082-1100 --download-only
@@ -93,49 +93,58 @@ CLICKHOUSE_USER=default
 CLICKHOUSE_DATABASE=beacon_chain
 CLICKHOUSE_SECURE=true
 
-# Remote Processing (required for --remote commands)
+# Remote Era URLs
 ERA_BASE_URL=https://era-files.com
-ERA_DOWNLOAD_DIR=./temp_era_files
-ERA_CLEANUP_AFTER_PROCESS=true
-ERA_MAX_RETRIES=3
+
+# Download settings
+DOWNLOAD_TIMEOUT=300
+MAX_RETRIES=3
+DOWNLOAD_THREADS=4
 ```
 
-## 📊 Features
+### Networks Supported
+- **gnosis** (auto-detected from `gnosis-*.era`)
+- **mainnet** (auto-detected from `mainnet-*.era`)  
+- **holesky** (auto-detected from `holesky-*.era`)
 
-- **🌐 Multi-Network Support**: Mainnet, Gnosis, Sepolia
-- **🔄 All Fork Support**: Phase 0, Altair, Bellatrix, Capella, Deneb, Electra
-- **📋 Multiple Export Formats**: JSON, JSONL, CSV, Parquet, ClickHouse
-- **🎯 Selective Data Extraction**: Extract specific data types
-- **📁 Flexible Output**: Single files or separate files per data type
-- **🚀 Batch Processing**: Process multiple era files at once
-- **🌍 Remote Era Processing**: Download and process from remote URLs
-- **🗄️ ClickHouse Integration**: Direct export with granular state tracking
-- **📈 Era State Management**: Track processing status per dataset
-- **🔄 Intelligent Resume**: Dataset-level granular recovery for robust processing
-- **🐳 Docker Support**: Containerized deployment
-- **⚡ High Performance**: Memory-efficient streaming processing
+Network configuration is automatic based on era filename.
 
-## 📖 Documentation
+## 📋 Available Commands
 
-- **[Setup Guide](docs/SETUP.md)** - Detailed installation and configuration
-- **[Development Guide](docs/DEVELOPMENT.md)** - Architecture and contributing
-- **[Era File Format](docs/ERA_FILE_FORMAT.md)** - Technical era file structure
-- **[Parsed Fields Reference](docs/PARSED_FIELDS.md)** - Complete field documentation
-- **[Network and Fork Support](docs/NETWORKS_FORKS.md)** - Supported networks and forks
-- **[ClickHouse Integration](docs/CLICKHOUSE.md)** - Database schema and usage
-- **[Remote Processing](docs/REMOTE_PROCESSING.md)** - Remote era file processing
-
-## 🎯 Common Use Cases
-
-### Research and Analytics
+### Era Range Formats
 ```bash
-# Extract all validator data for analysis period
+1082-1100    # Specific range
+1082         # Single era
+1082+        # Open-ended (from era 1082 onwards)
+```
+
+### Data Types
+- `all-blocks` - All beacon chain data (default)
+- `blocks` - Block headers and metadata  
+- `transactions` - Execution layer transactions
+- `attestations` - Validator attestations
+- `deposits` - Validator deposits
+- `withdrawals` - Validator withdrawals (Capella+)
+- `voluntary-exits` - Voluntary validator exits
+- `proposer-slashings` - Proposer slashing events
+- `attester-slashings` - Attester slashing events
+- `sync-aggregates` - Sync committee aggregates (Altair+)
+- `bls-changes` - BLS to execution changes (Capella+)
+- `execution-payloads` - Execution layer payloads (Bellatrix+)
+- `blob-kzg-commitments` - Blob KZG commitments (Deneb+)
+- `execution-requests` - Execution requests (Electra+)
+
+## 🎯 Usage Examples
+
+### Research & Analysis
+```bash
+# Extract validator data for analysis period
 era-parser --remote gnosis 1000-1100 attestations --export clickhouse
 era-parser --remote gnosis 1000-1100 deposits --export clickhouse
 era-parser --remote gnosis 1000-1100 withdrawals --export clickhouse
 
-# Continuous monitoring with intelligent resume
-era-parser --remote gnosis 2500+ all-blocks --export clickhouse --resume
+# Continuous monitoring
+era-parser --remote gnosis 2500+ all-blocks --export clickhouse
 ```
 
 ### Data Export
@@ -162,32 +171,27 @@ era-parser --era-failed gnosis
 era-parser --era-cleanup 30
 ```
 
-### Intelligent Resume Capability
+### Processing Modes
 
-The `--resume` flag provides **dataset-level granular recovery** for robust large-scale processing:
-
+#### Normal Mode (Default)
+Processes all specified eras:
 ```bash
-# Initial processing - processes all datasets
+# Processes all eras in range
 era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse
-
-# Network interruption or failure occurs...
-
-# Resume processes only incomplete/failed datasets
-era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse --resume
 ```
 
-**Key Benefits:**
-- **Smart Recovery**: Only processes missing or failed datasets, not entire eras
-- **Network Resilience**: Survives connection interruptions and continues exactly where it left off
-- **Granular Tracking**: Tracks 13+ datasets per era independently (`blocks`, `transactions`, `attestations`, etc.)
-- **Parallel Safe**: Multiple workers can process different datasets simultaneously
-- **No Redundant Work**: Avoids reprocessing already-completed data
+#### Force Mode
+Cleans existing data first, then reprocesses everything:
+```bash
+# Clean and reprocess all eras
+era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse --force
+```
 
-**Use Cases:**
-- Large-scale historical data processing
-- Network-unreliable environments
-- Long-running batch jobs
-- Distributed processing workflows
+**Force Mode Benefits:**
+- **Data Recovery**: Clean corrupted data and regenerate
+- **Schema Changes**: Reprocess after database updates  
+- **Fresh Start**: Completely regenerate a data range
+- **Testing**: Ensure clean state for testing
 
 ## 🔍 Output Formats
 

@@ -11,21 +11,41 @@ era-parser/
 │
 ├── docs/                        # Documentation
 │   ├── ERA_FILE_FORMAT.md      # Detailed era file format specification
+│   ├── CLICKHOUSE.md           # ClickHouse integration guide
+│   ├── PARSED_FIELDS.md        # Complete field documentation
 │   └── DEVELOPMENT.md          # This file
 │
 ├── era_parser/                  # Main package
 │   ├── __init__.py             # Package initialization
 │   ├── cli.py                  # Command line interface
 │   │
+│   ├── commands/               # CLI command implementations
+│   │   ├── __init__.py
+│   │   ├── base.py             # Common command functionality
+│   │   ├── local.py            # Local file processing
+│   │   ├── remote.py           # Remote era processing  
+│   │   ├── batch.py            # Batch operations
+│   │   ├── state.py            # State management commands
+│   │   └── migrate.py          # Database migrations
+│   │
+│   ├── core/                   # Business logic
+│   │   ├── __init__.py
+│   │   ├── era_processor.py         # Main processing coordinator
+│   │   ├── resume_handler.py        # Resume and force mode logic
+│   │   ├── era_data_cleaner.py      # Data cleanup operations
+│   │   ├── era_completion_manager.py # Completion status tracking
+│   │   └── output_manager.py        # Output file management
+│   │
 │   ├── config/                 # Network and fork configurations
 │   │   ├── __init__.py
 │   │   ├── networks.py         # Network-specific settings
 │   │   └── forks.py            # Fork definitions and detection
 │   │
-│   ├── ingestion/              # Era file reading and decompression
+│   ├── ingestion/              # Era file reading and remote downloading
 │   │   ├── __init__.py
 │   │   ├── era_reader.py       # Main era file reader
-│   │   └── compression.py      # Snappy decompression utilities
+│   │   ├── compression.py      # Snappy decompression utilities
+│   │   └── remote_downloader.py # Remote era file downloading
 │   │
 │   ├── parsing/                # Block parsing with fork-specific logic
 │   │   ├── __init__.py
@@ -41,12 +61,14 @@ era-parser/
 │   │       ├── deneb.py        # Deneb parser
 │   │       └── electra.py      # Electra parser
 │   │
-│   └── export/                 # Export formats (JSON, CSV, Parquet)
+│   └── export/                 # Export formats and ClickHouse integration
 │       ├── __init__.py
 │       ├── base.py             # Common export functionality
 │       ├── json_exporter.py    # JSON/JSONL export
 │       ├── csv_exporter.py     # CSV export
-│       └── parquet_exporter.py # Parquet export
+│       ├── parquet_exporter.py # Parquet export
+│       ├── clickhouse_exporter.py # ClickHouse integration
+│       └── era_state_manager.py   # Era processing state management
 │
 ├── output/                     # Default output directory (gitignored)
 ├── tests/                      # Test files (when added)
@@ -55,189 +77,192 @@ era-parser/
 
 ## Key Implementation Details
 
-### 1. Fork Parser Architecture
+### 1. Resume Logic Architecture
 
-The parser uses a modular inheritance-based system where each fork extends the previous fork's functionality:
+The resume system is built around three core components:
 
+#### `ResumeHandler` (core/resume_handler.py)
+Central coordinator for processing mode logic:
 ```python
-# Inheritance chain: Phase0 → Altair → Bellatrix → Capella → Deneb → Electra
-BaseForkParser (abstract)
-├── Phase0Parser
-└── AltairParser (extends Phase0Parser)
-    └── BellatrixParser (extends AltairParser) 
-        └── CapellaParser (extends BellatrixParser)
-            └── DenebParser (extends CapellaParser)
-                └── ElectraParser (extends DenebParser)
-
-# Registry system for dynamic parser selection
-FORK_PARSERS = {
-    'phase0': Phase0Parser,
-    'altair': AltairParser,
-    'bellatrix': BellatrixParser,
-    'capella': CapellaParser,
-    'deneb': DenebParser,
-    'electra': ElectraParser,
-}
-
-# Usage
-fork = get_fork_by_slot(slot, network)
-parser = get_fork_parser(fork)()
-body = parser.parse_body(body_data)
+def get_eras_to_process(self, network: str, available_eras: List[Tuple[int, str]], 
+                       resume: bool = False, force: bool = False) -> List[Tuple[int, str]]:
+    """
+    Determine which eras need processing
+    
+    Args:
+        network: Network name
+        available_eras: List of (era_number, url) tuples
+        resume: Whether to resume (skip completed eras) - Note: removed from remote processing
+        force: Whether to force reprocess everything
+        
+    Returns:
+        List of (era_number, url) tuples to process
+    """
 ```
 
-### 2. SSZ Parsing Strategy
+**Processing Modes:**
+- **Normal Mode** (`force=False`): Process all eras
+- **Force Mode** (`force=True`): Clean all eras first, then process everything
 
-Each fork parser implements `parse_body()` which handles the mixed structure correctly:
-
+#### `EraDataCleaner` (core/era_data_cleaner.py)  
+Handles data cleanup operations:
 ```python
-class BaseForkParser:
-    def parse_fixed_fields(self, body_data: bytes):
-        # Common 200-byte fixed fields: randao_reveal, eth1_data, graffiti
-        pass
+def clean_era_completely(self, network: str, era_number: int) -> None:
+    """Clean all data for an era's slot range - used for force mode"""
     
-    def parse_base_variable_fields(self, body_data: bytes, start_pos: int):
-        # 5 base variable field offsets (20 bytes)
-        pass
+def era_has_partial_data(self, network: str, era_number: int) -> bool:
+    """Check if era has partial data in any table"""
     
-    def parse_variable_field_data(self, body_data: bytes, offsets: List[int], 
-                                 field_definitions: List[tuple]):
-        # Parse actual variable data using offsets
-        pass
-
-class AltairParser(BaseForkParser):
-    def parse_body(self, body_data: bytes):
-        # 1. Parse fixed fields (200 bytes)
-        # 2. Parse base variable field offsets (20 bytes) 
-        # 3. Parse sync_aggregate INLINE (160 bytes)
-        # 4. Parse variable field data using offsets
-        pass
-
-class BellatrixParser(AltairParser):
-    def parse_body(self, body_data: bytes):
-        # Extends Altair + adds execution_payload offset parsing
-        pass
+def get_completed_eras(self, network: str, start_era: int = None, end_era: int = None) -> Set[int]:
+    """Get completed eras from era_completion table"""
 ```
 
-### 3. Network Configuration System
-
-Networks are centrally configured with automatic detection:
-
+#### `EraCompletionManager` (core/era_completion_manager.py)
+Tracks processing completion status:
 ```python
-# era_parser/config/networks.py
-NETWORK_CONFIGS = {
-    'mainnet': {
-        'GENESIS_TIME': 1606824023,
-        'SECONDS_PER_SLOT': 12,
-        'SLOTS_PER_EPOCH': 32,
-        'FORK_EPOCHS': {...}
-    },
-    'gnosis': {
-        'GENESIS_TIME': 1638993340,
-        'SECONDS_PER_SLOT': 5,
-        'SLOTS_PER_EPOCH': 16,
-        'FORK_EPOCHS': {...}
-    }
-}
-
-# Automatic network detection from filename
-def detect_network_from_filename(filename: str) -> str:
-    filename = filename.lower()
-    for network in NETWORK_CONFIGS.keys():
-        if network in filename:
-            return network
-    return 'mainnet'
+def record_era_completion(self, network: str, era_number: int, 
+                         total_records: int, datasets_processed: List[str]) -> None:
+    """Record successful era completion"""
+    
+def record_era_failure(self, network: str, era_number: int, error_message: str) -> None:
+    """Record era processing failure"""
 ```
 
-### 4. Export System Architecture
+### 2. Era State Management
 
-All exporters follow a consistent interface:
+The `EraStateManager` maintains processing state in ClickHouse:
+
+```sql
+-- Era completion tracking table
+CREATE TABLE era_completion (
+    network String,
+    era_number UInt32,
+    status Enum('processing', 'completed', 'failed'),
+    slot_start UInt64,
+    slot_end UInt64, 
+    total_records UInt64,
+    datasets_processed Array(String),
+    processing_started_at DateTime,
+    completed_at DateTime,
+    error_message String,
+    retry_count UInt8
+) ENGINE = ReplacingMergeTree(completed_at)
+ORDER BY (network, era_number);
+```
+
+**Key Features:**
+- **Atomic Operations**: Era status updates are atomic
+- **Retry Tracking**: Tracks failure attempts and retry counts
+- **Dataset Granularity**: Records which datasets were successfully processed
+- **Slot Range Mapping**: Maps era numbers to slot ranges for data cleanup
+
+### 3. CLI Command Structure
+
+The CLI is organized into command modules:
+
+#### `commands/remote.py`
+Handles remote era processing:
+```python
+class RemoteCommand(BaseCommand):
+    def execute(self, args: List[str]) -> None:
+        # Parse arguments
+        network = args[0]
+        era_range = args[1] 
+        command = args[2] if len(args) > 2 else None
+        
+        # Check for flags
+        force = '--force' in args
+        
+        # Process era range
+        downloader = get_remote_era_downloader()
+        result = downloader.process_era_range(
+            start_era, end_era,
+            command=command,
+            force=force,
+            export_type=export_type
+        )
+```
+
+#### `commands/state.py`
+Manages processing state:
+```python
+# Available commands:
+era-parser --era-status <network>     # Check completion status
+era-parser --era-failed <network>     # View failed eras  
+era-parser --era-cleanup <days>       # Clean old records
+era-parser --era-check <network> <range> # Check specific eras
+```
+
+### 4. Remote Processing Flow
+
+The remote processing workflow:
+
+1. **Discovery**: Find available era files on remote server
+2. **Force Mode Logic**: Determine which eras need processing based on force flag
+3. **Download**: Download era files to temporary directory
+4. **Process**: Extract and export data using era processor
+5. **Tracking**: Record completion status in ClickHouse
+6. **Cleanup**: Remove temporary files
 
 ```python
-class BaseExporter(ABC):
-    def __init__(self, era_info: Dict[str, Any]):
-        self.era_info = era_info
+# In remote_downloader.py
+def process_era_range(self, start_era: int, end_era: Optional[int] = None,
+                     command: str = "all-blocks", base_output: str = "output",
+                     separate_files: bool = False, force: bool = False,
+                     export_type: str = "file") -> Dict[str, Any]:
     
-    @abstractmethod
-    def export_blocks(self, blocks: List[Dict], output_file: str):
-        pass
+    # Get all available eras
+    available_eras = self.discover_era_files(start_era, end_era)
     
-    @abstractmethod 
-    def export_data_type(self, data: List[Dict], output_file: str, data_type: str):
-        pass
+    if force:
+        # Force mode: clean all eras first
+        for era_number, _ in available_eras:
+            state_manager.clean_era_data(era_number, self.network)
+        return available_eras
     
-    def flatten_block_for_table(self, block: Dict) -> Dict:
-        # Convert nested block structure to flat table format
-        pass
-
-# Concrete implementations
-class JSONExporter(BaseExporter):
-    # Preserves full nested structure
-    pass
-
-class CSVExporter(BaseExporter):
-    # Flattens structure, uses JSON strings for complex fields
-    pass
-
-class ParquetExporter(BaseExporter):  
-    # Optimized for analytics, includes metadata
-    pass
+    # Normal mode: process all eras (simplified logic)
+    return available_eras
 ```
 
 ## Adding New Features
 
-### Adding a New Fork
+### Adding a New Fork Parser
 
-To add a new fork (e.g., "Fulu"), you need to modify exactly 4 files:
-
-1. **config/forks.py** - Add fork configuration:
+1. **Create the parser file** in `parsing/forks/fulu.py`:
 ```python
-FORK_CONFIGS['fulu'] = {
-    'name': 'Fulu',
-    'has_validator_consolidations': True,  # New feature
-    'has_advanced_attestations': True,     # New feature
-}
+from typing import Dict, Any, Optional
+from .base import BaseForkParser
 
-def get_fork_by_slot(slot: int, network: str = 'mainnet') -> str:
-    # Add Fulu check in the cascade
-    if epoch >= fork_epochs.get('fulu', float('inf')):
-        return 'fulu'
-    # ... existing logic
-```
-
-2. **config/networks.py** - Add activation epoch for each network:
-```python
-NETWORK_CONFIGS['mainnet']['FORK_EPOCHS']['fulu'] = 1500000000
-NETWORK_CONFIGS['gnosis']['FORK_EPOCHS']['fulu'] = 2000000
-NETWORK_CONFIGS['sepolia']['FORK_EPOCHS']['fulu'] = 999999999
-```
-
-3. **parsing/forks/fulu.py** - Create the fork parser:
-```python
-from typing import Dict, Any
-from ..ssz_utils import parse_list_of_items, read_uint32_at
-from .electra import ElectraParser
-
-class FuluParser(ElectraParser):
-    """Parser for Fulu fork blocks"""
+class FuluParser(BaseForkParser):
+    """Parser for Fulu fork (example future fork)"""
     
-    def parse_validator_consolidation(self, data: bytes) -> Dict[str, Any]:
-        # Implement Fulu-specific parsing
-        return {
-            "source_validator": data[0:8], 
-            "target_validator": data[8:16]
-        }
+    FORK_NAME = "fulu"
     
-    def parse_body(self, body_data: bytes) -> Dict[str, Any]:
-        # Call parent parser first
-        result = super().parse_body(body_data)
+    def parse_beacon_block_body(self, body_data: bytes) -> Optional[Dict[str, Any]]:
+        """Parse Fulu fork beacon block body"""
+        # Inherit base parsing
+        parsed_data = super().parse_beacon_block_body(body_data)
+        if not parsed_data:
+            return None
         
-        # Add Fulu-specific field parsing
-        # ... implementation details
+        # Add new Fulu-specific fields
+        try:
+            # Example: new field at end of body
+            new_field_offset = self.get_offset_at(body_data, 15)  # 16th field
+            new_field_data = body_data[new_field_offset:]
+            parsed_data['new_fulu_field'] = self.parse_new_field(new_field_data)
+        except Exception as e:
+            print(f"Failed to parse Fulu-specific field: {e}")
         
-        return result
+        return parsed_data
+    
+    def parse_new_field(self, data: bytes) -> Any:
+        """Parse new field introduced in Fulu fork"""
+        # Implementation specific to the new field
+        pass
 ```
 
-4. **parsing/forks/__init__.py** - Register the parser:
+2. **Register the parser** in `parsing/forks/__init__.py`:
 ```python
 from .fulu import FuluParser
 
@@ -247,15 +272,20 @@ FORK_PARSERS = {
 }
 ```
 
+3. **Update network config** in `config/networks.py`:
+```python
+NETWORK_CONFIGS['mainnet']['FORK_EPOCHS']['fulu'] = 999999999  # Future epoch
+```
+
 **That's it!** The new fork automatically works with all CLI commands:
 ```bash
 era-parser fulu-era-12345.era all-blocks fulu_data.json
-era-parser fulu-era-12345.era transactions fulu_txs.csv --separate
+era-parser --remote mainnet 12345 all-blocks --export clickhouse
 ```
 
 ### Adding a New Network
 
-1. **config/networks.py** - Add network configuration:
+1. **Add network configuration** in `config/networks.py`:
 ```python
 NETWORK_CONFIGS['holesky'] = {
     'GENESIS_TIME': 1695902400,
@@ -326,16 +356,53 @@ __all__ = ["BaseExporter", "JSONExporter", "CSVExporter", "ParquetExporter", "XM
 
 3. Update CLI to support new format:
 ```python
-# In era_parser/cli.py, update export_data method:
+# In era_processor.py, update export logic:
 elif output_file.endswith('.xml'):
     exporter = XMLExporter(era_info)
     exporter.export_blocks(data, output_file)
 ```
 
+### Adding a New CLI Command
+
+1. Create command module `commands/analyze.py`:
+```python
+from typing import List
+from .base import BaseCommand
+
+class AnalyzeCommand(BaseCommand):
+    """Handler for data analysis operations"""
+    
+    def execute(self, args: List[str]) -> None:
+        """Execute analysis command"""
+        if not self.validate_required_args(args, 2, "era-parser --analyze <network> <analysis_type>"):
+            return
+        
+        network = args[0]
+        analysis_type = args[1]
+        
+        if analysis_type == "validator-performance":
+            self._analyze_validator_performance(network)
+        elif analysis_type == "network-health":
+            self._analyze_network_health(network)
+        else:
+            print(f"❌ Unknown analysis type: {analysis_type}")
+    
+    def _analyze_validator_performance(self, network: str):
+        # Implementation
+        pass
+```
+
+2. Register in `cli.py`:
+```python
+elif first_arg == "--analyze":
+    from .commands.analyze import AnalyzeCommand
+    command = AnalyzeCommand()
+    command.execute(sys.argv[2:])
+```
+
 ## Development Workflow
 
-### 1. Setup Development Environment
-
+### 1. Setting Up Development Environment
 ```bash
 # Clone repository
 git clone <repository-url>
@@ -343,173 +410,166 @@ cd era-parser
 
 # Create virtual environment
 python -m venv era_parser_env
-source era_parser_env/bin/activate  # On Windows: era_parser_env\Scripts\activate
+source era_parser_env/bin/activate  # or era_parser_env\Scripts\activate on Windows
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Install in development mode
-pip install -e .
+# Set up ClickHouse for testing
+docker run -d --name clickhouse-dev -p 8123:8123 clickhouse/clickhouse-server
 ```
 
-### 2. Running Tests
-
+### 2. Testing Changes
 ```bash
-# Install test dependencies
-pip install pytest pytest-cov
+# Test with local era file
+era-parser test-era-file.era blocks test_output.json
 
-# Run tests
-python -m pytest tests/ -v
+# Test remote processing
+era-parser --remote gnosis 1000 blocks --export clickhouse
 
-# Run with coverage
-python -m pytest tests/ --cov=era_parser --cov-report=html
+# Test force mode
+era-parser --remote gnosis 1000 blocks --export clickhouse --force
 ```
 
-### 3. Code Style
-
-The project follows Python best practices:
-
-- Use type hints where possible
-- Follow PEP 8 naming conventions
-- Write docstrings for public methods
-- Keep methods focused and small
-- Use meaningful variable names
-
-### 4. Testing New Parsers
-
-When adding a new fork parser:
-
+### 3. Debugging Processing Issues
 ```python
-# Test with actual era files
-era-parser test-era-file.era stats
-era-parser test-era-file.era block <slot>
+# Enable debug logging in era_processor.py
+import logging
+logging.basicConfig(level=logging.DEBUG)
 
-# Verify fork detection
-from era_parser.config import get_fork_by_slot
-print(get_fork_by_slot(slot, 'mainnet'))
+# Check era completion status
+era-parser --era-status gnosis
 
-# Test parsing
-from era_parser.parsing.forks import get_fork_parser
-parser = get_fork_parser('new_fork')
-# Test parser methods...
+# View failed eras
+era-parser --era-failed gnosis
+
+# Check specific era
+era-parser --era-check gnosis 1000-1002
 ```
 
-## Performance Considerations
+### 4. Database Schema Changes
 
-### 1. Memory Usage
+When modifying ClickHouse schema:
 
-The parser processes blocks incrementally to avoid loading entire era files into memory:
+1. **Update table definitions** in `export/clickhouse_exporter.py`
+2. **Create migration** in `commands/migrate.py`
+3. **Test migration** on development database
+4. **Document changes** in `CLICKHOUSE.md`
 
-- Era files are read sequentially
-- Blocks are parsed one at a time
-- Large data structures use generators where possible
-
-### 2. Processing Speed
-
-- Snappy decompression is the main bottleneck
-- SSZ parsing is optimized for minimal allocations
-- Progress tracking for long-running operations
-
-### 3. Output Optimization
-
-- Parquet format provides best compression
-- Separate files mode reduces memory usage
-- CSV includes metadata as comments
-
-## Debugging Tips
-
-### 1. SSZ Structure Issues
-
+Example migration:
 ```python
-# Debug block structure
-from era_parser.parsing.ssz_utils import read_uint32_at, read_uint64_at
-
-# Check offsets
-for i in range(5):
-    offset = read_uint32_at(data, 200 + i*4)
-    print(f"Offset {i}: {offset}")
-
-# Verify field boundaries
-print(f"Data length: {len(data)}")
+def migrate_add_new_field():
+    """Add new field to blocks table"""
+    try:
+        client.command("""
+            ALTER TABLE beacon_chain.blocks 
+            ADD COLUMN new_field String DEFAULT ''
+        """)
+        print("✅ Added new_field to blocks table")
+    except Exception as e:
+        print(f"❌ Migration failed: {e}")
 ```
 
-### 2. Fork Detection Problems
+### 5. Performance Optimization
 
+#### Parsing Performance
+- Use fixed-size parsing where possible (avoid SSZ offset calculations)
+- Implement parsing caches for repeated structures
+- Profile parsing bottlenecks with `cProfile`
+
+#### ClickHouse Performance
+- Use appropriate data types (UInt64 vs String)
+- Add indexes for common query patterns
+- Optimize batch insert sizes
+- Monitor query performance with `EXPLAIN`
+
+#### Memory Management
+- Process eras in streaming fashion for large datasets
+- Clean up temporary files promptly
+- Monitor memory usage during batch processing
+
+## Code Style Guidelines
+
+### Python Code Style
+- Follow PEP 8 with 100-character line limit
+- Use type hints for all function parameters and returns
+- Add docstrings for all public methods
+- Use descriptive variable names
+
+### Error Handling
 ```python
-# Debug fork calculation with new config system
-from era_parser.config import get_fork_by_slot, get_network_config
-
-slot = 12345
-network = 'gnosis'  # or 'mainnet', 'sepolia'
-
-# Get network config
-config = get_network_config(network)
-epoch = slot // config['SLOTS_PER_EPOCH']
-fork = get_fork_by_slot(slot, network)
-
-print(f"Network: {network}")
-print(f"Slot {slot} → Epoch {epoch} → Fork {fork}")
-print(f"Fork epochs: {config['FORK_EPOCHS']}")
-
-# Check if slot is near a fork boundary
-for fork_name, fork_epoch in config['FORK_EPOCHS'].items():
-    slot_boundary = fork_epoch * config['SLOTS_PER_EPOCH']
-    if abs(slot - slot_boundary) < 100:  # Within 100 slots
-        print(f"⚠️  Slot {slot} is near {fork_name} fork boundary at slot {slot_boundary}")
+# Good: Specific exception handling with logging
+try:
+    result = self.process_era(era_file)
+except EraParsingError as e:
+    logger.error(f"Failed to parse era {era_file}: {e}")
+    return None
+except ClickHouseError as e:
+    logger.error(f"Database error processing {era_file}: {e}")
+    raise
 ```
 
-### 3. Export Issues
-
+### Logging
 ```python
-# Test export without full processing
-from era_parser.export import JSONExporter, CSVExporter
+import logging
+logger = logging.getLogger(__name__)
 
-# Create minimal test data
-test_blocks = [{"slot": "123", "data": {"message": {"proposer_index": "1"}}}]
-era_info = {"era_number": 1, "network": "test", "start_slot": 0, "end_slot": 8191}
-
-# Test JSON export
-json_exporter = JSONExporter(era_info)
-json_exporter.export_blocks(test_blocks, "test_output.json")
-
-# Test CSV export  
-csv_exporter = CSVExporter(era_info)
-csv_exporter.export_blocks(test_blocks, "test_output.csv")
-
-print("Export test completed - check output/ directory")
-
-# Test CLI export
-import subprocess
-result = subprocess.run([
-    'era-parser', 'test.era', 'all-blocks', 'test.json'
-], capture_output=True, text=True)
-
-if result.returncode != 0:
-    print("CLI Error:", result.stderr)
-else:
-    print("CLI Success:", result.stdout)
+# Use appropriate log levels
+logger.debug("Processing era file: %s", era_file)
+logger.info("Completed era %d with %d records", era_number, record_count)
+logger.warning("Era %d has partial data, cleaning", era_number)
+logger.error("Failed to process era %d: %s", era_number, error)
 ```
 
-## Release Process
+## Testing Strategy
 
-### 1. Version Bumping
+### Unit Tests
+```python
+# Test individual components
+def test_resume_handler():
+    handler = ResumeHandler(mock_client, "test_db")
+    
+    # Test normal mode
+    result = handler.get_eras_to_process("mainnet", available_eras, force=False)
+    assert len(result) == len(available_eras)
+    
+    # Test force mode  
+    result = handler.get_eras_to_process("mainnet", available_eras, force=True)
+    assert len(result) == len(available_eras)  # Should process all after cleanup
+```
 
-Update version in:
-- `setup.py`
-- `era_parser/__init__.py`
+### Integration Tests
+```python
+# Test complete processing workflows
+def test_remote_processing_with_force():
+    # Initial processing
+    result1 = process_era_range("gnosis", 1000, 1002, force=False)
+    assert result1["success"]
+    
+    # Force should clean and reprocess
+    result2 = process_era_range("gnosis", 1000, 1002, force=True)
+    assert result2["success"]
+```
 
-### 2. Release Notes
+### Performance Tests
+- Test parsing performance with various era file sizes
+- Benchmark ClickHouse insert performance
+- Test memory usage under different processing modes
 
-Document changes in:
-- New features
-- Bug fixes
-- Breaking changes
-- Migration notes
+## Deployment
 
-### 3. Testing
+### Production Deployment
+1. **Environment Setup**: Configure production ClickHouse cluster
+2. **Resource Planning**: Estimate CPU, memory, and storage requirements
+3. **Monitoring**: Set up logging and metrics collection
+4. **Backup Strategy**: Regular ClickHouse backups and era file archival
 
-- Test with multiple era files
-- Verify all export formats
-- Check backward compatibility
+### Scaling Considerations
+- **Horizontal Scaling**: Multiple parser instances with different era ranges
+- **Database Sharding**: Partition data by network or time period
+- **Caching**: Cache frequently accessed era completion data
+- **Load Balancing**: Distribute processing across multiple workers
 
-This development guide should help contributors understand the codebase structure and development workflow.
+---
+
+**Next Steps**: Check out the [Era File Format Guide](ERA_FILE_FORMAT.md) for low-level implementation details.
