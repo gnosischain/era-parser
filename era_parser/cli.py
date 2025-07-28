@@ -70,11 +70,12 @@ def main():
             command.execute(sys.argv[2:])
             
         elif first_arg == "--remote":
+            print(f"🔍 CLI routing to remote command with args: {sys.argv[2:]}")
             from .commands.remote import RemoteCommand
             command = RemoteCommand()
             command.execute(sys.argv[2:])  # Pass args without --remote
             
-        elif first_arg in ["--era-status", "--era-failed", "--era-cleanup", "--era-check"]:
+        elif first_arg in ["--era-status", "--era-failed", "--era-cleanup", "--era-check", "--clean-failed-eras"]:
             from .commands.state import StateCommand
             command = StateCommand()
             command.execute(sys.argv[1:])  # Include the command flag

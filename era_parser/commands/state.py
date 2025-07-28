@@ -2,7 +2,6 @@ import os
 from typing import List
 
 from .base import BaseCommand
-from ..export.era_state_manager import EraStateManager
 
 def load_env_file(env_file_path: str = '.env'):
     """Load environment variables from .env file"""
@@ -21,7 +20,7 @@ def load_env_file(env_file_path: str = '.env'):
         print(f"   ℹ️  No .env file found at {env_file_path}")
 
 class StateCommand(BaseCommand):
-    """Handler for era state management operations"""
+    """Handler for era state management operations using unified state manager"""
     
     def execute(self, args: List[str]) -> None:
         """Execute state management command"""
@@ -46,12 +45,10 @@ class StateCommand(BaseCommand):
     
     def _ensure_environment_loaded(self):
         """Ensure environment variables are loaded before creating EraStateManager"""
-        # Check if ClickHouse variables are already set
         if not os.getenv('CLICKHOUSE_HOST') or not os.getenv('CLICKHOUSE_PASSWORD'):
             print("🔧 ClickHouse environment not detected, loading from .env file...")
             load_env_file()
             
-            # Check again after loading
             if not os.getenv('CLICKHOUSE_HOST') or not os.getenv('CLICKHOUSE_PASSWORD'):
                 print("❌ ClickHouse environment variables not found!")
                 print("💡 Make sure to set CLICKHOUSE_HOST and CLICKHOUSE_PASSWORD in your .env file")
@@ -107,7 +104,7 @@ class StateCommand(BaseCommand):
             self.handle_error(e, "getting era status")
 
     def _handle_clean_failed_eras(self, args: List[str]) -> None:
-        """Handle cleaning failed eras"""
+        """Handle cleaning failed eras using unified state manager"""
         if not self.validate_required_args(args, 1, "era-parser --clean-failed-eras <network>"):
             return
         
@@ -141,76 +138,73 @@ class StateCommand(BaseCommand):
         limit = int(args[1]) if len(args) > 1 else 20
         
         try:
+            from ..export.era_state_manager import EraStateManager
             state_manager = EraStateManager()
-            failed = state_manager.get_failed_datasets(network, limit)
+            failed = state_manager.get_failed_eras(network)
             
-            print(f"❌ Failed Datasets" + (f" ({network})" if network else " (All Networks)"))
+            print(f"❌ Failed Eras" + (f" ({network})" if network else " (All Networks)"))
             print("="*60)
             
             if not failed:
-                print("No failed datasets found.")
+                print("No failed eras found.")
                 return
             
-            for failure in failed:
-                print(f"Era: {failure['era_filename']}")
-                print(f"  Dataset: {failure['dataset']}")
-                print(f"  Network: {failure['network']}")
-                print(f"  Era Number: {failure['era_number']}")
-                print(f"  Attempts: {failure['attempt_count']}")
-                print(f"  Error: {failure['error_message'][:100]}...")
-                print(f"  Failed At: {failure['created_at']}")
+            # Show up to limit
+            for era_number in failed[:limit]:
+                print(f"Era: {era_number}")
+                print(f"  Network: {network}")
                 print()
                 
         except Exception as e:
-            self.handle_error(e, "getting failed datasets")
+            self.handle_error(e, "getting failed eras")
     
     def _handle_era_cleanup(self, args: List[str]) -> None:
-        """Handle era cleanup operations"""
+        """Handle era cleanup operations using unified state manager"""
         if not self._ensure_environment_loaded():
             return
             
-        timeout = int(args[0]) if args else 30
-        
         try:
+            from ..export.era_state_manager import EraStateManager
             state_manager = EraStateManager()
-            reset_count = state_manager.cleanup_stale_processing(timeout)
             
-            if reset_count > 0:
-                print(f"✅ Reset {reset_count} stale processing entries")
-            else:
-                print("No stale processing entries found")
+            print("🔧 Optimizing tables for deduplication...")
+            state_manager.optimize_tables()
+            print("✅ Table optimization completed")
                 
         except Exception as e:
-            self.handle_error(e, "cleaning up stale processing")
+            self.handle_error(e, "cleaning up")
     
     def _handle_era_check(self, args: List[str]) -> None:
-        """Handle era status check for specific file"""
-        if not self.validate_required_args(args, 1, "era-parser --era-check <era_file>"):
+        """Handle era status check for specific era using unified state manager"""
+        if not self.validate_required_args(args, 2, "era-parser --era-check <network> <era_number>"):
             return
         
         if not self._ensure_environment_loaded():
             return
         
-        era_file = args[0]
+        network = args[0]
+        try:
+            era_number = int(args[1])
+        except ValueError:
+            print("❌ Era number must be an integer")
+            return
         
         try:
+            from ..export.era_state_manager import EraStateManager
             state_manager = EraStateManager()
-            era_filename = state_manager.get_era_filename_from_path(era_file)
             
-            # Check if fully processed
-            is_complete = state_manager.is_era_fully_processed(era_filename)
-            pending_datasets = state_manager.get_pending_datasets(era_filename)
+            completed_eras = state_manager.get_completed_eras(network, era_number, era_number)
+            failed_eras = state_manager.get_failed_eras(network)
             
-            print(f"📋 Era Status: {era_filename}")
+            print(f"📋 Era Status: {network} era {era_number}")
             print("="*60)
-            print(f"Fully Processed: {'✅ Yes' if is_complete else '❌ No'}")
             
-            if pending_datasets:
-                print(f"Pending Datasets ({len(pending_datasets)}):")
-                for dataset in pending_datasets:
-                    print(f"  - {dataset}")
+            if era_number in completed_eras:
+                print("Status: ✅ Completed")
+            elif era_number in failed_eras:
+                print("Status: ❌ Failed")
             else:
-                print("All datasets completed ✅")
+                print("Status: ⏸️  Not processed")
                 
         except Exception as e:
             self.handle_error(e, "checking era status")

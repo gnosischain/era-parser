@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 import re
 
 class RemoteEraDownloader:
-    """Optimized downloads and processes era files from remote URLs with fastdiscovery"""
+    """Optimized downloads and processes era files from remote URLs with unified state management"""
      
     def __init__(self, base_url: str, network: str, download_dir: Optional[str] = None, 
                  cleanup: bool = True, max_retries: int = 3):
@@ -26,7 +26,7 @@ class RemoteEraDownloader:
             max_retries: Maximum retry attempts for downloads
         """
         self.base_url = base_url.rstrip('/')
-        self.network = network.lower()
+        self.network = network.lower() if network else ''
         self.cleanup = cleanup
         self.max_retries = max_retries
         
@@ -42,9 +42,16 @@ class RemoteEraDownloader:
             self.download_dir = Path(tempfile.gettempdir()) / "era_downloads"
             self.download_dir.mkdir(parents=True, exist_ok=True)
         
-        # Progress tracking
-        self.progress_file = self.download_dir / f".era_progress_{network}.json"
-        self.progress_data = self._load_progress()
+        # Progress tracking (only if network is set)
+        if self.network:
+            self.progress_file = self.download_dir / f".era_progress_{self.network}.json"
+            self.progress_data = self._load_progress()
+        else:
+            self.progress_file = None
+            self.progress_data = {"network": "", "processed_eras": [], "failed_eras": [], "last_run": None}
+        
+        # Use unified state manager (lazy initialization)
+        self.state_manager = None
         
         print(f"🌐 Optimized Remote Era Downloader initialized")
         print(f"   Base URL: {self.base_url}")
@@ -52,10 +59,23 @@ class RemoteEraDownloader:
         print(f"   S3 Detected: {self.is_s3}")
         print(f"   Download dir: {self.download_dir}")
         print(f"   Cleanup after processing: {self.cleanup}")
+        
+        # Debug: print network again to confirm it's set
+        if not self.network:
+            print(f"⚠️  WARNING: Network is empty! This may cause issues.")
+        else:
+            print(f"✅ Network properly set to: '{self.network}'")
+    
+    def _get_state_manager(self):
+        """Lazy initialization of unified state manager"""
+        if self.state_manager is None:
+            from ..export.era_state_manager import EraStateManager
+            self.state_manager = EraStateManager()
+        return self.state_manager
     
     def _load_progress(self) -> Dict[str, Any]:
         """Load progress from previous runs"""
-        if self.progress_file.exists():
+        if self.progress_file and self.progress_file.exists():
             try:
                 with open(self.progress_file, 'r') as f:
                     return json.load(f)
@@ -75,24 +95,18 @@ class RemoteEraDownloader:
             json.dump(self.progress_data, f, indent=2)
     
     def _discover_directory_listing(self, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
-        """
-        OPTIMIZATION: Parse HTML directory listing for non-S3 servers
-        """
+        """Parse HTML directory listing for non-S3 servers"""
         print(f"📂 Using directory listing discovery")
         
         try:
-            # Get the directory listing page
             response = requests.get(self.base_url, timeout=30)
             if response.status_code != 200:
                 print(f"   ❌ Directory listing failed (status {response.status_code})")
                 return self._discover_parallel(start_era, end_era)
             
-            # Parse HTML to find era files
             html_content = response.text
             available_eras = []
             
-            # Look for era file links using regex
-            # Pattern matches: <a href="network-XXXXX-hash.era">
             pattern = rf'<a href="({self.network}-(\d{{5}})-[a-f0-9]{{8}}\.era)">'
             
             import re
@@ -101,7 +115,6 @@ class RemoteEraDownloader:
             for filename, era_str in matches:
                 era_number = int(era_str)
                 
-                # Apply era range filters
                 if era_number < start_era:
                     continue
                 if end_era is not None and era_number > end_era:
@@ -110,7 +123,6 @@ class RemoteEraDownloader:
                 url = f"{self.base_url}/{filename}"
                 available_eras.append((era_number, url))
             
-            # Sort by era number
             available_eras.sort(key=lambda x: x[0])
             
             print(f"   🎯 Found {len(available_eras)} era files in directory listing")
@@ -121,22 +133,16 @@ class RemoteEraDownloader:
             return self._discover_parallel(start_era, end_era)
 
     def discover_era_files(self, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
-        """
-        OPTIMIZED: Fast discovery of available era files
-        """
+        """Fast discovery of available era files"""
         print(f"🚀 Fast discovery starting from era {start_era}")
         
         if self.is_s3:
-            # Use S3 bulk listing
             return self._discover_s3_bulk(start_era, end_era)
         else:
-            # Try directory listing first, fall back to parallel if it fails
             return self._discover_directory_listing(start_era, end_era)
     
     def _discover_s3_bulk(self, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
-        """
-        OPTIMIZATION: Bulk S3 listing with proper pagination to get ALL era files
-        """
+        """Bulk S3 listing with proper pagination"""
         print(f"📦 Using S3 bulk listing for ultra-fast discovery")
         
         all_available_eras = []
@@ -146,13 +152,10 @@ class RemoteEraDownloader:
             session = requests.Session()
             session.headers.update({'User-Agent': 'era-parser/1.0'})
             
-            # Paginate through ALL era files using S3 continuation tokens
             page = 1
             while True:
-                # Build S3 list request with prefix for the network
                 list_url = f"{self.base_url}/?list-type=2&prefix={self.network}-&max-keys=1000"
                 
-                # Add continuation token for pagination (with proper URL encoding)
                 if continuation_token:
                     import urllib.parse
                     encoded_token = urllib.parse.quote(continuation_token, safe='')
@@ -167,26 +170,22 @@ class RemoteEraDownloader:
                     
                     print(f"   📊 Page {page}: Found {len(page_eras)} era files")
                     
-                    # Check if there are more results
                     continuation_token = self._extract_continuation_token(response.text)
                     if not continuation_token:
-                        break  # No more pages
+                        break
                     
                     page += 1
                     
-                    # Safety check to prevent infinite loops (increased limit for large buckets)
-                    if page > 500:  # Max 500,000 files (500 pages * 1000 each)
+                    if page > 500:
                         print(f"   ⚠️  Reached maximum page limit, stopping pagination")
                         break
                         
                 else:
                     print(f"   ⚠️  S3 listing page {page} failed (status {response.status_code})")
                     if page == 1:
-                        # If first page fails, fall back to parallel
                         print(f"   ⚠️  First page failed, falling back to parallel discovery")
                         return self._discover_parallel(start_era, end_era)
                     else:
-                        # If later page fails, return what we have so far
                         print(f"   ⚠️  Pagination failed, returning {len(all_available_eras)} files found so far")
                         break
             
@@ -198,27 +197,21 @@ class RemoteEraDownloader:
             return self._discover_parallel(start_era, end_era)
     
     def _extract_continuation_token(self, xml_content: str) -> Optional[str]:
-        """
-        Extract NextContinuationToken from S3 XML response
-        """
+        """Extract NextContinuationToken from S3 XML response"""
         try:
-            # Try XML parsing first
             root = ET.fromstring(xml_content)
             
-            # Look for NextContinuationToken with different namespace approaches
             for ns_prefix in ['', 's3:']:
                 ns_dict = {'': 'http://s3.amazonaws.com/doc/2006-03-01/', 's3': 'http://s3.amazonaws.com/doc/2006-03-01/'} if ns_prefix else {}
                 token_elem = root.find(f'.//{ns_prefix}NextContinuationToken', ns_dict)
                 if token_elem is not None and token_elem.text:
                     return token_elem.text
             
-            # Try without namespace
             token_elem = root.find('.//NextContinuationToken')
             if token_elem is not None and token_elem.text:
                 return token_elem.text
                 
         except ET.ParseError:
-            # If XML parsing fails, use regex
             import re
             match = re.search(r'<NextContinuationToken>([^<]+)</NextContinuationToken>', xml_content)
             if match:
@@ -227,22 +220,17 @@ class RemoteEraDownloader:
         return None
     
     def _parse_s3_listing(self, xml_content: str, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
-        """
-        Parse S3 XML listing to extract era file URLs
-        """
+        """Parse S3 XML listing to extract era file URLs"""
         available_eras = []
         
         try:
-            # Try XML parsing first
             root = ET.fromstring(xml_content)
             
-            # Handle different XML namespaces
             namespaces = {
                 '': 'http://s3.amazonaws.com/doc/2006-03-01/',
                 's3': 'http://s3.amazonaws.com/doc/2006-03-01/'
             }
             
-            # Find all Key elements
             keys = []
             for ns_prefix in ['', 's3:']:
                 ns_dict = namespaces if ns_prefix else {}
@@ -252,7 +240,6 @@ class RemoteEraDownloader:
                     if key_elem is not None and key_elem.text:
                         keys.append(key_elem.text)
             
-            # Also try without namespace
             if not keys:
                 for content_elem in root.findall('.//Contents'):
                     key_elem = content_elem.find('Key')
@@ -260,11 +247,9 @@ class RemoteEraDownloader:
                         keys.append(key_elem.text)
                         
         except ET.ParseError:
-            # If XML parsing fails, use regex on raw content
             print(f"   📝 XML parsing failed, using regex extraction")
             keys = self._extract_keys_with_regex(xml_content)
         
-        # Process found keys and filter by era range
         era_pattern = rf'{self.network}-(\d{{5}})-[a-f0-9]{{8}}\.era'
         
         for key in keys:
@@ -272,7 +257,6 @@ class RemoteEraDownloader:
             if match:
                 era_number = int(match.group(1))
                 
-                # Apply era range filters
                 if era_number < start_era:
                     continue
                 if end_era is not None and era_number > end_era:
@@ -281,18 +265,14 @@ class RemoteEraDownloader:
                 url = f"{self.base_url}/{key}"
                 available_eras.append((era_number, url))
         
-        # Sort by era number
         available_eras.sort(key=lambda x: x[0])
         
         return available_eras
     
     def _extract_keys_with_regex(self, content: str) -> List[str]:
-        """
-        Extract S3 keys using regex when XML parsing fails
-        """
+        """Extract S3 keys using regex when XML parsing fails"""
         keys = []
         
-        # Try different patterns for S3 listing formats
         patterns = [
             rf'<Key>({self.network}-\d{{5}}-[a-f0-9]{{8}}\.era)</Key>',
             rf'>({self.network}-\d{{5}}-[a-f0-9]{{8}}\.era)<',
@@ -305,20 +285,16 @@ class RemoteEraDownloader:
                 keys.extend(matches)
                 break
         
-        return list(set(keys))  # Remove duplicates
+        return list(set(keys))
     
     def _discover_parallel(self, start_era: int, end_era: Optional[int] = None) -> List[Tuple[int, str]]:
-        """
-        OPTIMIZATION: Parallel discovery for non-S3 URLs or S3 fallback - finds ALL era files
-        """
+        """Parallel discovery for non-S3 URLs or S3 fallback"""
         print(f"⚡ Using parallel discovery")
         
         available_eras = []
         
-        # For open-ended ranges, we need to discover the actual range first
         if end_era is None:
             print(f"   🔍 Open-ended range detected, discovering actual range...")
-            # Start with a reasonable estimate and expand as needed
             estimated_end = self._estimate_max_era(start_era)
             print(f"   📊 Estimated range: {start_era} to {estimated_end}")
             era_range = list(range(start_era, estimated_end + 1))
@@ -327,8 +303,7 @@ class RemoteEraDownloader:
         
         print(f"   📋 Checking {len(era_range)} eras in total")
         
-        # OPTIMIZATION: Process in parallel batches
-        batch_size = 100  # Increased batch size for better throughput
+        batch_size = 100
         
         for batch_start in range(0, len(era_range), batch_size):
             batch_eras = era_range[batch_start:batch_start + batch_size]
@@ -341,13 +316,10 @@ class RemoteEraDownloader:
             
             print(f"   📊 Batch result: {found_in_batch}/{len(batch_eras)} found")
             
-            # For open-ended ranges, continue until we hit significant gaps
             if end_era is None:
-                # If we find very few files in recent batches, we might be near the end
                 if found_in_batch < 5 and batch_eras[0] > start_era + 1000:
-                    # Check if we've hit a significant gap
                     consecutive_empty_batches = self._count_consecutive_empty_batches(available_eras, batch_eras[0], batch_size)
-                    if consecutive_empty_batches >= 3:  # 3 mostly empty batches = likely at the end
+                    if consecutive_empty_batches >= 3:
                         print(f"   🛑 Found {consecutive_empty_batches} consecutive mostly-empty batches, likely reached end")
                         break
         
@@ -356,10 +328,7 @@ class RemoteEraDownloader:
         return available_eras
     
     def _estimate_max_era(self, start_era: int) -> int:
-        """
-        Estimate the maximum era number by checking a few high values
-        """
-        # For Gnosis, we know there are 2600+ eras, so let's start with a reasonable estimate
+        """Estimate the maximum era number by checking a few high values"""
         test_eras = [1000, 2000, 3000, 4000, 5000]
         
         max_found = start_era
@@ -372,7 +341,7 @@ class RemoteEraDownloader:
                 era = future_to_era[future]
                 try:
                     result = future.result()
-                    if result:  # Era exists
+                    if result:
                         max_found = max(max_found, era)
                         print(f"   ✅ Era {era} exists")
                     else:
@@ -380,19 +349,15 @@ class RemoteEraDownloader:
                 except Exception:
                     print(f"   ❌ Era {era} check failed")
         
-        # Add buffer above the highest found era
         estimated_max = max_found + 1000
         print(f"   📊 Highest confirmed era: {max_found}, estimating max: {estimated_max}")
         return estimated_max
     
     def _count_consecutive_empty_batches(self, available_eras: List[Tuple[int, str]], current_era: int, batch_size: int) -> int:
-        """
-        Count how many recent batches had very few results
-        """
+        """Count how many recent batches had very few results"""
         if not available_eras:
             return 0
         
-        # Look at the last few batches worth of eras
         recent_eras = [era for era, _ in available_eras if era >= current_era - (batch_size * 3)]
         batches_checked = (current_era - (current_era - len(recent_eras))) // batch_size
         
@@ -401,23 +366,18 @@ class RemoteEraDownloader:
         
         avg_per_batch = len(recent_eras) / max(1, batches_checked)
         
-        # If average is very low, consider it "empty"
         return 3 if avg_per_batch < 5 else 0
     
     def _check_eras_parallel(self, era_numbers: List[int]) -> List[Tuple[int, str]]:
-        """
-        Check multiple eras in parallel using ThreadPoolExecutor
-        """
+        """Check multiple eras in parallel using ThreadPoolExecutor"""
         available_eras = []
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-            # Submit all era checks
             future_to_era = {
                 executor.submit(self._check_single_era, era_num): era_num 
                 for era_num in era_numbers
             }
             
-            # Collect results as they complete
             for future in concurrent.futures.as_completed(future_to_era, timeout=60):
                 era_num = future_to_era[future]
                 try:
@@ -430,34 +390,26 @@ class RemoteEraDownloader:
         return available_eras
     
     def _check_single_era(self, era_number: int) -> Optional[str]:
-        """
-        Check if a single era exists and return its URL
-        """
+        """Check if a single era exists and return its URL"""
         try:
-            # Build the URL pattern for this era
             era_str = f"{era_number:05d}"
             
-            # Method 1: Try pattern matching for S3-like URLs
             if self.is_s3:
-                # For S3, try a HEAD request with common patterns
                 common_patterns = [
-                    f"{self.base_url}/{self.network}-{era_str}.era",  # Without hash
+                    f"{self.base_url}/{self.network}-{era_str}.era",
                 ]
                 
                 for url in common_patterns:
                     if self._url_exists(url):
                         return url
             
-            # Method 2: Try directory listing approach
             return self._discover_era_file_with_hash_fast(era_number)
             
         except Exception as e:
             return None
     
     def _url_exists(self, url: str, timeout: int = 5) -> bool:
-        """
-        Fast check if URL exists using HEAD request
-        """
+        """Fast check if URL exists using HEAD request"""
         try:
             response = requests.head(url, timeout=timeout, allow_redirects=True)
             return response.status_code == 200
@@ -465,19 +417,15 @@ class RemoteEraDownloader:
             return False
     
     def _discover_era_file_with_hash_fast(self, era_number: int) -> Optional[str]:
-        """
-        Fast discovery of era file with hash - optimized version
-        """
+        """Fast discovery of era file with hash"""
         era_str = f"{era_number:05d}"
         
         try:
-            # Quick S3 prefix listing for this specific era
             if self.is_s3:
                 list_url = f"{self.base_url}/?list-type=2&prefix={self.network}-{era_str}-&max-keys=5"
                 response = requests.get(list_url, timeout=10)
                 
                 if response.status_code == 200:
-                    # Quick regex search for the file
                     pattern = rf'{self.network}-{era_str}-[a-f0-9]{{8}}\.era'
                     matches = re.findall(pattern, response.text, re.IGNORECASE)
                     if matches:
@@ -497,19 +445,16 @@ class RemoteEraDownloader:
                 response = requests.get(url, stream=True, timeout=30)
                 response.raise_for_status()
                 
-                # Get file size if available
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded = 0
                 
                 with open(local_path, 'wb') as f:
-                    # Use 1MB chunks instead of 8KB for much faster downloads
                     for chunk in response.iter_content(chunk_size=20*1024*1024):  # 20MB chunks
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
                             
-                            # Simple progress indicator
-                            if total_size > 0 and downloaded % (20*1024*1024) == 0:  # Every 20MB
+                            if total_size > 0 and downloaded % (20*1024*1024) == 0:
                                 progress = (downloaded / total_size) * 100
                                 print(f"   📊 Progress: {progress:.1f}% ({downloaded // (1024*1024)}MB / {total_size // (1024*1024)}MB)", end='\r')
                 
@@ -523,7 +468,7 @@ class RemoteEraDownloader:
             except Exception as e:
                 print(f"   ❌ Download attempt {attempt + 1} failed: {e}")
                 if attempt < self.max_retries - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    time.sleep(2 ** attempt)
                 else:
                     print(f"   ❌ All download attempts failed")
                     return False
@@ -531,21 +476,11 @@ class RemoteEraDownloader:
         return False
     
     def download_era(self, era_number: int, url: str) -> Optional[str]:
-        """
-        Download a specific era file
-        
-        Args:
-            era_number: Era number
-            url: Direct URL to era file
-            
-        Returns:
-            Local file path if successful, None if failed
-        """
+        """Download a specific era file"""
         era_str = f"{era_number:05d}"
         filename = f"{self.network}-{era_str}.era"
         local_path = self.download_dir / filename
         
-        # Skip if already exists and is valid
         if local_path.exists() and local_path.stat().st_size > 0:
             print(f"   ♻️  Era {era_number} already downloaded: {local_path}")
             return str(local_path)
@@ -557,7 +492,6 @@ class RemoteEraDownloader:
         if self._download_file(url, local_path):
             return str(local_path)
         else:
-            # Clean up partial download
             if local_path.exists():
                 local_path.unlink()
             return None
@@ -571,139 +505,117 @@ class RemoteEraDownloader:
             except Exception as e:
                 print(f"   ⚠️  Cleanup failed: {e}")
 
-    def get_processed_eras_from_state(self, network: str, start_era: int = None, end_era: int = None) -> set:
+    def determine_eras_to_process(self, start_era: int, end_era: Optional[int], 
+                                 force: bool = False) -> List[Tuple[int, str]]:
         """
-        Get list of fully processed era numbers from era state manager.
+        Determine which eras need processing with proper state management
         
         Args:
-            network: Network name
-            start_era: Start era filter
-            end_era: End era filter
+            start_era: Start era number
+            end_era: End era number (None for open-ended)
+            force: Whether to force reprocess everything
             
         Returns:
-            Set of era numbers that are fully processed
+            List of (era_number, url) tuples to process
         """
-        try:
-            from ..export.era_state_manager import EraStateManager
-            state_manager = EraStateManager()
-            
-            # Query for fully completed eras in range using the era_processing_progress view
-            import clickhouse_connect
-            client = clickhouse_connect.get_client(
-                host=state_manager.host,
-                port=state_manager.port,
-                username=state_manager.user,
-                password=state_manager.password,
-                database=state_manager.database,
-                secure=state_manager.secure,
-                verify=False
-            )
-            
-            # Build query with range filters using the progress view
-            query = f"""
-            SELECT era_number
-            FROM {state_manager.database}.era_processing_progress
-            WHERE network = '{network}'
-              AND completed_datasets = total_datasets
-              AND completed_datasets > 0
-            """
-            
-            if start_era is not None:
-                query += f" AND era_number >= {start_era}"
-            if end_era is not None:
-                query += f" AND era_number <= {end_era}"
-                
-            query += " ORDER BY era_number"
-            
-            result = client.query(query)
-            processed_eras = {row[0] for row in result.result_rows}
-            
-            print(f"📋 Found {len(processed_eras)} fully processed eras in era state for {network}")
-            
-            return processed_eras
-            
-        except Exception as e:
-            print(f"⚠️  Could not check era state: {e}")
-            return set()
-    
-    def get_eras_to_process(self, start_era: int, end_era: Optional[int], 
-                       force: bool = False) -> List[Tuple[int, str]]:
-        """Determine which eras need processing with simplified logic"""
-        
         # Get all available eras
         available_eras = self.discover_era_files(start_era, end_era)
         print(f"📋 Discovered {len(available_eras)} available eras")
         
+        if not available_eras:
+            return []
+        
         if force:
-            # Force mode: clean all eras and process everything
             print(f"🔥 Force mode: will clean and reprocess all {len(available_eras)} eras")
             try:
-                from ..export.era_state_manager import EraStateManager
-                state_manager = EraStateManager()
-                for era_number, _ in available_eras:
-                    state_manager.clean_era_data(era_number, self.network)
+                state_manager = self._get_state_manager()
+                for era_num, _ in available_eras:
+                    if state_manager.era_has_partial_data(era_num, self.network):
+                        state_manager.clean_era_completely(self.network, era_num)
             except Exception as e:
                 print(f"⚠️  Could not clean force mode eras: {e}")
             return available_eras
         
-        # Normal mode: skip completed eras, process incomplete ones
+        # Normal mode: Check for completed eras with timeout protection
         print(f"🔍 Checking for completed eras...")
         
+        if not self.network:
+            print(f"⚠️  Network is empty, cannot check completed eras. Processing all.")
+            return available_eras
+        
         try:
-            from ..export.era_state_manager import EraStateManager
-            state_manager = EraStateManager()
+            import threading
+            import queue
             
-            # Get the era range for the query
-            era_numbers = [era_num for era_num, _ in available_eras]
-            if era_numbers:
-                min_era = min(era_numbers)
-                max_era = max(era_numbers)
-                print(f"📊 Querying completed eras in range {min_era}-{max_era}...")
-            else:
-                print(f"❌ No era numbers found in available eras")
-                return []
+            # Use threading with timeout to avoid hanging
+            result_queue = queue.Queue()
             
-            completed_eras = state_manager.get_completed_eras(
-                self.network, 
-                min_era, 
-                max_era
-            )
+            def check_completed_eras():
+                try:
+                    state_manager = self._get_state_manager()
+                    era_numbers = [era_num for era_num, _ in available_eras]
+                    if era_numbers:
+                        min_era = min(era_numbers)
+                        max_era = max(era_numbers)
+                        completed_eras = state_manager.get_completed_eras(self.network, min_era, max_era)
+                        result_queue.put(('success', completed_eras))
+                    else:
+                        result_queue.put(('success', set()))
+                except Exception as e:
+                    result_queue.put(('error', str(e)))
             
-            print(f"✅ Found {len(completed_eras)} completed eras")
+            # Start the check in a separate thread
+            thread = threading.Thread(target=check_completed_eras)
+            thread.daemon = True
+            thread.start()
             
-            # OPTIMIZED: Just filter out completed eras, no partial data check
-            incomplete_eras = []
-            skipped_count = 0
-            
-            print(f"📋 Filtering incomplete eras...")
-            for era_number, url in available_eras:
-                if era_number in completed_eras:
-                    skipped_count += 1
-                    continue
-                incomplete_eras.append((era_number, url))
-            
-            print(f"📋 Skipping {skipped_count} completed eras, processing {len(incomplete_eras)} incomplete eras")
-            
-            if incomplete_eras:
-                first_incomplete = incomplete_eras[0][0]
-                last_incomplete = incomplete_eras[-1][0] if len(incomplete_eras) > 1 else first_incomplete
-                print(f"🚀 Will process eras {first_incomplete} to {last_incomplete}")
-            
-            return incomplete_eras
-            
+            # Wait for result with timeout
+            try:
+                result_type, result_data = result_queue.get(timeout=30)  # 30 second timeout
+                
+                if result_type == 'success':
+                    completed_eras = result_data
+                    print(f"✅ Found {len(completed_eras)} completed eras")
+                    
+                    # Filter out completed eras
+                    incomplete_eras = []
+                    skipped_count = 0
+                    
+                    for era_num, url in available_eras:
+                        if era_num in completed_eras:
+                            skipped_count += 1
+                            continue
+                        incomplete_eras.append((era_num, url))
+                    
+                    print(f"📋 Skipping {skipped_count} completed eras, processing {len(incomplete_eras)} incomplete eras")
+                    
+                    if incomplete_eras:
+                        first_incomplete = incomplete_eras[0][0]
+                        last_incomplete = incomplete_eras[-1][0] if len(incomplete_eras) > 1 else first_incomplete
+                        print(f"🚀 Will process eras {first_incomplete} to {last_incomplete}")
+                    
+                    return incomplete_eras
+                    
+                else:
+                    print(f"❌ Error checking completed eras: {result_data}")
+                    print(f"📋 Processing all {len(available_eras)} eras as fallback")
+                    return available_eras
+                    
+            except queue.Empty:
+                print(f"⏰ Timeout checking completed eras (30s), processing all eras as fallback")
+                return available_eras
+                
         except Exception as e:
-            print(f"⚠️  Era check failed: {e}")
-            import traceback
-            print(f"🔍 Error details: {traceback.format_exc()}")
-            print(f"📋 Falling back to processing all {len(available_eras)} eras")
+            print(f"❌ Error in completion check: {e}")
+            print(f"📋 Processing all {len(available_eras)} eras as fallback")
             return available_eras
 
     def process_era_range(self, start_era: int, end_era: Optional[int], 
-                     command: str, base_output: str, separate_files: bool = False,
-                     force: bool = False, export_type: str = "file",
-                     processed_eras: set = None) -> Dict[str, Any]:
+                         command: str, base_output: str, separate_files: bool = False,
+                         force: bool = False, export_type: str = "file",
+                         processed_eras: set = None) -> Dict[str, Any]:
         """
-        Download and process a range of era files with simplified state management
+        Download and process a range of era files with unified state management
         """
         print(f"🚀 Starting remote era processing")
         print(f"   Range: {start_era} to {end_era or 'end'}")
@@ -711,8 +623,8 @@ class RemoteEraDownloader:
         print(f"   Force: {force}")
         print(f"   Export type: {export_type}")
         
-        # Get eras to process using simplified logic (removed resume parameter)
-        eras_to_process = self.get_eras_to_process(start_era, end_era, force)
+        # Get eras to process using unified logic
+        eras_to_process = self.determine_eras_to_process(start_era, end_era, force)
         
         if not eras_to_process:
             print("❌ No era files to process")
@@ -723,7 +635,6 @@ class RemoteEraDownloader:
         failed_count = 0
         failed_eras = []
         
-        # Import here to avoid circular dependencies
         from ..core import EraProcessor
         
         for i, (era_number, url) in enumerate(eras_to_process, 1):
@@ -748,7 +659,7 @@ class RemoteEraDownloader:
                     output_file = self._generate_era_output_filename(base_output, era_number)
                     print(f"   📂 Output: {output_file}")
                 else:
-                    output_file = "clickhouse_output"  # Not used for ClickHouse
+                    output_file = "clickhouse_output"
                     print(f"   🗄️  Output: ClickHouse")
                 
                 # Process based on command
@@ -792,15 +703,12 @@ class RemoteEraDownloader:
             "failed_eras": failed_eras
         }
 
-
     def _generate_era_output_filename(self, base_output: str, era_number: int) -> str:
         """Generate output filename for era"""
-        # Extract directory and base name
         output_dir = os.path.dirname(base_output) if os.path.dirname(base_output) else ""
         base_name = os.path.splitext(os.path.basename(base_output))[0]
         extension = os.path.splitext(base_output)[1] or ".json"
         
-        # Generate filename with era number
         filename = f"{base_name}_era_{era_number:05d}{extension}"
         
         if output_dir:
@@ -848,9 +756,12 @@ def load_env_file(env_file_path: str = '.env'):
         print(f"   ℹ️  No .env file found at {env_file_path}")
 
 
-def get_remote_era_downloader() -> RemoteEraDownloader:
+def get_remote_era_downloader(network: str = None) -> RemoteEraDownloader:
     """
     Factory function to create RemoteEraDownloader from environment variables
+    
+    Args:
+        network: Network name (gnosis, mainnet, sepolia)
     
     Environment variables:
         ERA_BASE_URL: Base URL for era files (required)
@@ -872,10 +783,16 @@ def get_remote_era_downloader() -> RemoteEraDownloader:
     cleanup = os.getenv('ERA_CLEANUP_AFTER_PROCESS', 'true').lower() == 'true'
     max_retries = int(os.getenv('ERA_MAX_RETRIES', '3'))
     
-    # Network will be set when initializing
+    # Ensure network is properly set
+    if network is None or network == 'None' or network == '':
+        print(f"⚠️  Warning: Network is None/empty! Setting to empty string.")
+        network = ''
+    
+    print(f"🔧 Creating downloader with network: '{network}'")
+    
     return RemoteEraDownloader(
         base_url=base_url,
-        network='',  # Will be set by caller
+        network=network,
         download_dir=download_dir,
         cleanup=cleanup,
         max_retries=max_retries
