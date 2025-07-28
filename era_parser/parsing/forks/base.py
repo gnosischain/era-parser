@@ -1,4 +1,5 @@
 import json
+import struct
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -362,9 +363,9 @@ class BaseForkParser(ABC):
             return None
         return "0x" + data.hex()
     
-    # Execution payload parsing with version differences
-    def parse_execution_payload_base(self, data: bytes) -> Tuple[Dict[str, Any], int, Dict[str, int]]:
-        """Parse the common part of execution payload (Bellatrix base)"""
+    # UPDATED: Execution payload parsing with fork-specific offset handling
+    def parse_execution_payload_base(self, data: bytes, fork: str = "bellatrix") -> Tuple[Dict[str, Any], int, Dict[str, int]]:
+        """Parse the common part of execution payload with fork-specific offset handling"""
         if len(data) < 100:
             return {}, 0, {}
             
@@ -385,19 +386,68 @@ class BaseForkParser(ABC):
         offsets["extra_data"] = read_uint32_at(data, pos); pos += 4
         result["base_fee_per_gas"] = str(int.from_bytes(data[pos:pos+32], 'little')); pos += 32
         result["block_hash"] = "0x" + data[pos:pos+32].hex(); pos += 32
+        
+        # Count how many variable field offsets exist by looking at remaining data
+        # Each fork has a different number of variable fields:
+        # Bellatrix: 2 (extra_data, transactions)
+        # Capella+: 2 or 3 (extra_data, transactions, [withdrawals if present])
+        
+        available_offset_bytes = len(data) - pos
+        if fork in ["deneb", "electra"]:
+            available_offset_bytes -= 16  # Account for blob gas fields
+        
+        num_offsets_available = available_offset_bytes // 4
+        
         offsets["transactions"] = read_uint32_at(data, pos); pos += 4
+        
+        # Only read withdrawals offset if there's another offset available
+        if fork in ["capella", "deneb", "electra"] and num_offsets_available >= 2:
+            offsets["withdrawals"] = read_uint32_at(data, pos); pos += 4
+        
+        if fork in ["deneb", "electra"]:
+            result["blob_gas_used"] = str(read_uint64_at(data, pos)); pos += 8
+            result["excess_blob_gas"] = str(read_uint64_at(data, pos)); pos += 8
         
         return result, pos, offsets
     
     def parse_transaction_data(self, data: bytes) -> str:
         """Parse complete transaction data to hex string"""
         return "0x" + data.hex()
-    
+
     def parse_execution_payload_variable_fields(self, data: bytes, offsets: Dict[str, int], 
-                                              variable_fields: List[str]) -> Dict[str, Any]:
+                                         variable_fields: List[str]) -> Dict[str, Any]:
         """Parse variable fields in execution payload"""
         result = {}
         
+        # REAL FIX: If transactions and withdrawals have the same offset, 
+        # it means transactions is empty and withdrawals starts immediately
+        if ("transactions" in offsets and "withdrawals" in offsets and 
+            offsets["transactions"] == offsets["withdrawals"]):
+            result["transactions"] = []
+            
+            # Process other fields normally
+            for field_name in variable_fields:
+                if field_name == "transactions":
+                    continue  # Already handled above
+                elif field_name not in offsets:
+                    continue
+                    
+                start = offsets[field_name]
+                end = len(data)
+                sorted_offsets = sorted([v for v in offsets.values() if v > start])
+                if sorted_offsets: 
+                    end = sorted_offsets[0]
+                
+                field_data = data[start:end]
+                
+                if field_name == "extra_data": 
+                    result["extra_data"] = "0x" + field_data.hex()
+                elif field_name == "withdrawals": 
+                    result["withdrawals"] = parse_list_of_items(field_data, self.parse_withdrawal)
+            
+            return result
+        
+        # Normal processing when offsets are different
         for field_name in variable_fields:
             if field_name not in offsets:
                 continue
@@ -418,22 +468,23 @@ class BaseForkParser(ABC):
                 result["withdrawals"] = parse_list_of_items(field_data, self.parse_withdrawal)
         
         return result
-    
+
     def parse_variable_field_data(self, body_data: bytes, all_offsets: List[int], 
                                  field_definitions: List[tuple]) -> Dict[str, Any]:
         """Parse variable field data using offsets - FIXED for better debugging"""
         result = {}
         
+        
         for i, ((field_name, parser_func, *args), offset) in enumerate(zip(field_definitions, all_offsets)):
+            
             # Find end position
             end = len(body_data)
             next_offsets = [o for o in all_offsets if o > offset]
             if next_offsets:
                 end = min(next_offsets)
             
-            # FIXED: Check if this field is empty (same offset as next field)
+            # Check if this field is empty
             if i + 1 < len(all_offsets) and offset == all_offsets[i + 1]:
-                # This field is empty - same offset as next field
                 if field_name in ["sync_aggregate", "execution_payload"]:
                     result[field_name] = {}
                 elif field_name == "execution_requests":
@@ -443,7 +494,6 @@ class BaseForkParser(ABC):
                 continue
             
             if offset >= len(body_data) or end <= offset:
-                # Handle missing/empty fields
                 if field_name in ["sync_aggregate", "execution_payload"]:
                     result[field_name] = {}
                 elif field_name == "execution_requests":
@@ -454,22 +504,24 @@ class BaseForkParser(ABC):
 
             field_data = body_data[offset:end]
             
-            try:         
+            try:
                 if parser_func == parse_list_of_items:
                     result[field_name] = parser_func(field_data, *args)
                 else:
                     result[field_name] = parser_func(field_data, *args)
                     
             except Exception as e:
-                print(f"Error parsing field {field_name}: {e}")
-                # Set default values on parse error
+                print(f"❌ Error parsing field {field_name}: {e}")
+                import traceback
+                traceback.print_exc()
+                
                 if field_name in ["sync_aggregate", "execution_payload"]:
                     result[field_name] = {}
                 elif field_name == "execution_requests":
                     result[field_name] = {"deposits": [], "withdrawals": [], "consolidations": []}
                 else:
                     result[field_name] = []
-        
+
         return result
     
     def ensure_all_fields(self, result: Dict[str, Any], expected_fields: List[str]) -> Dict[str, Any]:

@@ -10,7 +10,7 @@ class BellatrixParser(AltairParser):
     def parse_execution_payload(self, data: bytes, fork: str = "bellatrix") -> Dict[str, Any]:
         """Parse execution_payload for Bellatrix (no withdrawals or blob gas)"""
         try:
-            result, pos, offsets = self.parse_execution_payload_base(data)
+            result, pos, offsets = self.parse_execution_payload_base(data, "bellatrix")
             
             # Bellatrix only has: extra_data, transactions
             variable_fields = ["extra_data", "transactions"]

@@ -73,6 +73,23 @@ class ElectraParser(DenebParser):
             
         except Exception:
             return {"deposits": [], "withdrawals": [], "consolidations": []}
+
+    def parse_execution_payload(self, data: bytes, fork: str = "electra") -> Dict[str, Any]:
+        """Parse execution_payload for Electra (same as Deneb)"""
+        try:
+            result, pos, offsets = self.parse_execution_payload_base(data, "electra")
+            
+            # Electra has: extra_data, transactions, withdrawals (same as Deneb)
+            variable_fields = ["extra_data", "transactions", "withdrawals"]
+            
+            # Parse variable fields
+            variable_result = self.parse_execution_payload_variable_fields(data, offsets, variable_fields)
+            result.update(variable_result)
+            
+            return result
+            
+        except Exception:
+            return {}
     
     def parse_body(self, body_data: bytes) -> Dict[str, Any]:
         """Parse Electra beacon block body"""
@@ -117,7 +134,7 @@ class ElectraParser(DenebParser):
         all_offsets = base_offsets + [execution_payload_offset, bls_changes_offset, 
                                      blob_commitments_offset, execution_requests_offset]
         all_field_definitions = self.get_base_field_definitions() + [
-            ("execution_payload", self.parse_execution_payload, "deneb"),
+            ("execution_payload", self.parse_execution_payload, "electra"),
             ("bls_to_execution_changes", parse_list_of_items, self.parse_bls_to_execution_change),
             ("blob_kzg_commitments", parse_list_of_items, self.parse_kzg_commitment),
             ("execution_requests", self.parse_execution_requests)

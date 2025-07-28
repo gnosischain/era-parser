@@ -10,17 +10,7 @@ class DenebParser(CapellaParser):
     def parse_execution_payload(self, data: bytes, fork: str = "deneb") -> Dict[str, Any]:
         """Parse execution_payload for Deneb (adds blob gas fields)"""
         try:
-            result, pos, offsets = self.parse_execution_payload_base(data)
-            
-            # Inherited from Capella: withdrawals offset
-            offsets["withdrawals"] = read_uint32_at(data, pos)
-            pos += 4
-            
-            # NEW in Deneb: blob gas fields
-            result["blob_gas_used"] = str(read_uint64_at(data, pos))
-            pos += 8
-            result["excess_blob_gas"] = str(read_uint64_at(data, pos))
-            pos += 8
+            result, pos, offsets = self.parse_execution_payload_base(data, "deneb")
             
             # Deneb has: extra_data, transactions, withdrawals (same as Capella)
             variable_fields = ["extra_data", "transactions", "withdrawals"]

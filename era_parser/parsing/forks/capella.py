@@ -8,11 +8,7 @@ class CapellaParser(BellatrixParser):
     def parse_execution_payload(self, data: bytes, fork: str = "capella") -> Dict[str, Any]:
         """Parse execution_payload for Capella (adds withdrawals)"""
         try:
-            result, pos, offsets = self.parse_execution_payload_base(data)
-            
-            # NEW in Capella: withdrawals offset
-            offsets["withdrawals"] = read_uint32_at(data, pos)
-            pos += 4
+            result, pos, offsets = self.parse_execution_payload_base(data, "capella")
             
             # Capella has: extra_data, transactions, withdrawals
             variable_fields = ["extra_data", "transactions", "withdrawals"]
@@ -23,7 +19,10 @@ class CapellaParser(BellatrixParser):
             
             return result
             
-        except Exception:
+        except Exception as e:
+            print(f"❌ EXECUTION PAYLOAD PARSING FAILED: {e}")
+            import traceback
+            traceback.print_exc()
             return {}
     
     def parse_body(self, body_data: bytes) -> Dict[str, Any]:
