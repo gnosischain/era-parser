@@ -16,7 +16,7 @@ class ClickHouseService:
     """Optimized service for beacon chain data with migration support and time-based partitioning"""
 
     # Single global batch size for all operations
-    GLOBAL_BATCH_SIZE = 5000
+    GLOBAL_BATCH_SIZE = 100000
 
     def __init__(self):
         """Initialize ClickHouse service from environment variables"""

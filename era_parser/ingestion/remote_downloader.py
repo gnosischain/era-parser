@@ -11,8 +11,8 @@ import xml.etree.ElementTree as ET
 import re
 
 class RemoteEraDownloader:
-    """Optimized downloads and processes era files from remote URLs with fast discovery"""
-    
+    """Optimized downloads and processes era files from remote URLs with fastdiscovery"""
+     
     def __init__(self, base_url: str, network: str, download_dir: Optional[str] = None, 
                  cleanup: bool = True, max_retries: int = 3):
         """
@@ -489,7 +489,7 @@ class RemoteEraDownloader:
             return None
     
     def _download_file(self, url: str, local_path: Path) -> bool:
-        """Download a file with retry logic"""
+        """Download a file with retry logic and larger chunks"""
         for attempt in range(self.max_retries):
             try:
                 print(f"   📥 Downloading (attempt {attempt + 1}/{self.max_retries})")
@@ -502,13 +502,14 @@ class RemoteEraDownloader:
                 downloaded = 0
                 
                 with open(local_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+                    # Use 1MB chunks instead of 8KB for much faster downloads
+                    for chunk in response.iter_content(chunk_size=20*1024*1024):  # 20MB chunks
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
                             
                             # Simple progress indicator
-                            if total_size > 0 and downloaded % (1024 * 1024) == 0:  # Every MB
+                            if total_size > 0 and downloaded % (20*1024*1024) == 0:  # Every 20MB
                                 progress = (downloaded / total_size) * 100
                                 print(f"   📊 Progress: {progress:.1f}% ({downloaded // (1024*1024)}MB / {total_size // (1024*1024)}MB)", end='\r')
                 
