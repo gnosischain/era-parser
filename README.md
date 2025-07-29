@@ -1,6 +1,6 @@
 # Era Parser - Beacon Chain Era File Parser
 
-A modular, extensible parser for Gnosis/Ethereum beacon chain era files supporting multiple networks, forks, and export formats with **remote era file processing** and **granular ClickHouse state management**.
+A modular, extensible parser for Gnosis/Ethereum beacon chain era files supporting multiple networks, forks, and export formats with **remote era file processing** and **unified ClickHouse state management**.
 
 ## 🚀 Quick Start
 
@@ -9,7 +9,7 @@ A modular, extensible parser for Gnosis/Ethereum beacon chain era files supporti
 #### Native Installation
 ```bash
 # Clone and install
-git clone https://github.com/your-org/era-parser.git
+git clone https://github.com/gnosischain/era-parser.git
 cd era-parser
 python -m venv era_parser_env
 source era_parser_env/bin/activate  # Windows: era_parser_env\Scripts\activate
@@ -174,9 +174,9 @@ era-parser --era-cleanup 30
 ### Processing Modes
 
 #### Normal Mode (Default)
-Processes all specified eras:
+Processes all specified eras, skipping those already completed:
 ```bash
-# Processes all eras in range
+# Processes only unprocessed eras in range
 era-parser --remote gnosis 1082-1100 all-blocks --export clickhouse
 ```
 

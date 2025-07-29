@@ -65,7 +65,7 @@ sudo yum groupinstall -y "Development Tools"
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/era-parser.git
+git clone https://github.com/gnosischain/era-parser.git
 cd era-parser
 
 # Create virtual environment
@@ -94,7 +94,7 @@ python -m venv era_parser_env
 source era_parser_env/bin/activate
 
 # Install directly from repository
-pip install git+https://github.com/your-org/era-parser.git
+pip install git+https://github.com/gnosischain/era-parser.git
 
 # Verify installation
 era-parser --help
@@ -104,7 +104,7 @@ era-parser --help
 
 ```bash
 # Clone with development dependencies
-git clone https://github.com/your-org/era-parser.git
+git clone https://github.com/gnosischain/era-parser.git
 cd era-parser
 
 # Create development environment
@@ -113,7 +113,7 @@ source era_parser_dev/bin/activate
 
 # Install development dependencies
 pip install -r requirements.txt
-pip install -r requirements-dev.txt
+pip install -r requirements-test.txt
 pip install -e .
 
 # Install pre-commit hooks
@@ -150,7 +150,7 @@ ERA_MAX_CONCURRENT_DOWNLOADS=10
 
 # Optional: Performance Tuning
 ERA_DEBUG=false
-ERA_BATCH_SIZE=10000
+ERA_BATCH_SIZE=100000
 ```
 
 ### Configuration Templates
@@ -250,6 +250,24 @@ except Exception as e:
 "
 ```
 
+### Migration System Test
+
+```bash
+# Test migration system
+era-parser --migrate status
+
+# Run migrations if needed
+era-parser --migrate run
+
+# Expected output:
+# 📊 MIGRATION STATUS
+# =======================================
+# Applied migrations: 2
+# Available migrations: 2
+# Pending migrations: 0
+# Last applied: 002
+```
+
 ### Remote Processing Test
 
 ```bash
@@ -260,13 +278,27 @@ era-parser --remote gnosis 1082 --download-only
 era-parser --remote gnosis 1082 all-blocks test_output.json
 ```
 
+### State Management Test
+
+```bash
+# Test unified state management
+era-parser --era-status gnosis
+
+# Expected output:
+# 📊 Era Processing Summary (gnosis)
+# ============================================================
+# ✅ Completed eras: 0
+# ❌ Failed eras: 0
+# 📊 Total records: 0
+```
+
 ## Docker Setup
 
 ### Quick Docker Start
 
 ```bash
 # Clone repository
-git clone https://github.com/your-org/era-parser.git
+git clone https://github.com/gnosischain/era-parser.git
 cd era-parser
 
 # Copy environment template
@@ -355,7 +387,7 @@ volumes:
 
 ```bash
 # Clone repository
-git clone https://github.com/your-org/era-parser.git
+git clone https://github.com/gnosischain/era-parser.git
 cd era-parser
 
 # Create development environment
@@ -364,7 +396,7 @@ source era_parser_dev/bin/activate
 
 # Install development dependencies
 pip install -r requirements.txt
-pip install -r requirements-dev.txt
+pip install -r requirements-test.txt
 pip install -e .
 
 # Install pre-commit hooks
@@ -469,6 +501,18 @@ print('CLICKHOUSE_HOST:', os.getenv('CLICKHOUSE_HOST'))
 "
 ```
 
+**Migration Issues**:
+```bash
+# Check migration status
+era-parser --migrate status
+
+# If migrations are stuck, check ClickHouse connectivity
+era-parser --migrate list
+
+# Run specific migration
+era-parser --migrate run 002
+```
+
 **Permission Issues**:
 ```bash
 # Fix directory permissions
@@ -486,8 +530,8 @@ htop
 # or
 ps aux | grep era-parser
 
-# Reduce batch size
-export ERA_BATCH_SIZE=5000
+# The new system uses a single global batch size of 100,000
+# Memory usage should be consistent
 ```
 
 **Network Issues**:
@@ -507,6 +551,21 @@ clickhouse-client --host your-host --secure --password
 
 # Check firewall settings
 telnet your-clickhouse-host.com 8443
+
+# Test unified state management
+era-parser --era-status gnosis
+```
+
+**State Management Issues**:
+```bash
+# Clean failed eras using unified state manager
+era-parser --clean-failed-eras gnosis
+
+# Check specific era status
+era-parser --era-check gnosis 1082
+
+# Force clean era range
+era-parser --remote --force-clean gnosis 1082-1100
 ```
 
 ### Getting Help
@@ -555,5 +614,16 @@ pip install orjson
 -- Optimize ClickHouse settings
 SET max_memory_usage = 10000000000;
 SET max_threads = 8;
-SET max_insert_block_size = 1048576;
+SET max_insert_block_size = 100000;
+```
+
+**Unified Processing Verification**:
+```bash
+# Verify unified processing is working
+era-parser sample.era all-blocks test.json
+
+# Should show unified processing messages:
+# 🔧 Processing with command: 'all-blocks'
+# 📊 Loading all data types to ClickHouse:
+# ✅ Era 1082 completed: 70203 records, 13 datasets
 ```
