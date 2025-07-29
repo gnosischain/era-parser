@@ -1,5 +1,3 @@
-"""Remote era processing commands with unified state management"""
-
 from typing import List, Tuple, Optional
 
 from .base import BaseCommand
@@ -49,7 +47,6 @@ class RemoteCommand(BaseCommand):
         
         try:
             downloader = get_remote_era_downloader(network)
-            # FIXED: Properly set the network and reinitialize progress tracking
             downloader.network = network
             downloader.progress_file = downloader.download_dir / f".era_progress_{network}.json"
             downloader.progress_data = downloader._load_progress()
@@ -76,7 +73,6 @@ class RemoteCommand(BaseCommand):
         
         try:
             downloader = get_remote_era_downloader(network)
-            # FIXED: Properly set the network
             downloader.network = network
             downloader.progress_file = downloader.download_dir / f".era_progress_{network}.json"
             downloader.progress_data = downloader._load_progress()

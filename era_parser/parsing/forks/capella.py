@@ -1,5 +1,3 @@
-"""Capella fork parser - Declarative approach"""
-
 from typing import Dict, Any
 from ..ssz_utils import parse_list_of_items
 from .bellatrix import BellatrixParser

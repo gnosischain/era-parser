@@ -1,5 +1,3 @@
-"""Base command class with common functionality"""
-
 import os
 import sys
 from abc import ABC, abstractmethod

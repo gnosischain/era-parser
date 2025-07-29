@@ -1,5 +1,3 @@
-"""Phase 0 fork parser - Declarative approach"""
-
 from typing import Dict, Any
 from .base import BaseForkParser
 

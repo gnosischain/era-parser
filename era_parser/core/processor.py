@@ -1,5 +1,3 @@
-"""Core era processing logic extracted from original CLI"""
-
 import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone

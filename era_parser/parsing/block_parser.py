@@ -1,5 +1,3 @@
-"""Main block parsing logic with improved timestamp calculation"""
-
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 

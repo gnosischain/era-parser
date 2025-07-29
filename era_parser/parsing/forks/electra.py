@@ -1,5 +1,3 @@
-"""Electra fork parser - Declarative approach"""
-
 from typing import Dict, Any, Optional
 from ..ssz_utils import parse_list_of_items, read_uint32_at, read_uint64_at
 from .deneb import DenebParser

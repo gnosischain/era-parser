@@ -1,7 +1,3 @@
-"""
-Simplified ClickHouse exporter with unified state management
-"""
-
 import json
 import logging
 import time

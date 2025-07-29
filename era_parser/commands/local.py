@@ -1,5 +1,3 @@
-"""Local file processing commands"""
-
 import json
 from typing import List
 

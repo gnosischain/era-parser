@@ -1,5 +1,3 @@
-"""Era file reading and record extraction"""
-
 import struct
 import os
 from typing import List, Tuple, Optional, NamedTuple

@@ -1,7 +1,3 @@
-"""
-Migration 002: Simplified era completion tracking
-"""
-
 from .base_migration import BaseMigration
 
 def up(client, database: str):

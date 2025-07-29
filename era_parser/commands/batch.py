@@ -1,5 +1,3 @@
-"""Batch processing commands"""
-
 import os
 from typing import List
 

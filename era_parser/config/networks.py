@@ -1,5 +1,3 @@
-"""Network configuration for different Ethereum networks"""
-
 NETWORK_CONFIGS = {
     'mainnet': {
         'GENESIS_TIME': 1606824023,

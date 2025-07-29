@@ -1,5 +1,3 @@
-"""Parquet exporter with sync_aggregates support"""
-
 import pandas as pd
 from typing import List, Dict, Any
 from datetime import datetime, timezone

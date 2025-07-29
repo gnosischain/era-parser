@@ -1,8 +1,3 @@
-"""
-Base migration class for SQL file execution
-All migrations inherit from this to avoid code duplication
-"""
-
 import os
 import logging
 

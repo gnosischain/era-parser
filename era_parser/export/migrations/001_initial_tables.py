@@ -1,7 +1,3 @@
-"""
-Migration 001: Initial beacon chain tables
-"""
-
 from .base_migration import BaseMigration
 
 def up(client, database: str):

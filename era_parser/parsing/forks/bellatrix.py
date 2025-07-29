@@ -1,5 +1,3 @@
-"""Bellatrix fork parser - Declarative approach"""
-
 from typing import Dict, Any
 from .altair import AltairParser
 

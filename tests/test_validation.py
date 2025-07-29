@@ -1,6 +1,3 @@
-"""
-Simple validation tests comparing RPC data against era-parser data
-"""
 import pytest
 from pathlib import Path
 from deepdiff import DeepDiff

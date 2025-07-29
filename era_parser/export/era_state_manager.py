@@ -1,7 +1,3 @@
-"""
-Unified era state management - consolidates all state operations
-"""
-
 import os
 import logging
 from typing import List, Dict, Any, Optional, Tuple, Set

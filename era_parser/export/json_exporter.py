@@ -1,5 +1,3 @@
-"""JSON and JSONL exporters"""
-
 import json
 from typing import List, Dict, Any
 
