@@ -1,5 +1,3 @@
-"""Era slot range calculation utilities"""
-
 from typing import Tuple, List
 from ..config import get_network_config
 

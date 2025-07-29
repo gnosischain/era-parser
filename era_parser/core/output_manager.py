@@ -1,5 +1,3 @@
-"""Output file management utilities"""
-
 import os
 import glob
 from pathlib import Path

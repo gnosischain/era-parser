@@ -1,8 +1,3 @@
-"""
-ClickHouse Migration Manager
-Simple migration system that maintains backward compatibility
-"""
-
 import os
 import logging
 import importlib

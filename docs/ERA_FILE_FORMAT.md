@@ -216,8 +216,8 @@ execution_payload_offset_pos = 200 + (5 * 4) + 160
 ```python
 def parse_list_of_items(data: bytes, item_parser_func):
     # Fixed-size items (withdrawals, deposit requests)
-    if item_parser_func.__name__ in FIXED_SIZE_PARSERS:
-        item_size = ITEM_SIZES[item_parser_func.__name__]
+    if hasattr(item_parser_func, 'ssz_size'):
+        item_size = item_parser_func.ssz_size
         return [item_parser_func(data[i*item_size:(i+1)*item_size]) 
                 for i in range(len(data) // item_size)]
     
@@ -325,69 +325,11 @@ attestation_1: IndexedAttestation           # Variable
 attestation_2: IndexedAttestation           # Variable
 ```
 
-### Era Parser's Fixed-Size Parser Registry
-
-```python
-fixed_size_parsers = {
-    'parse_withdrawal': 44,           # Execution withdrawals
-    'parse_deposit_request': 192,     # Electra deposit requests  
-    'parse_withdrawal_request': 76,   # Electra withdrawal requests
-    'parse_consolidation_request': 116, # Electra consolidation requests
-    'parse_kzg_commitment': 48,       # Deneb blob commitments
-    'parse_voluntary_exit': 112,      # Voluntary validator exits
-    'parse_deposit': 1240,            # Beacon chain deposits (THE KEY FIX!)
-}
-```
-
-### Parsing Logic Flow
-
-```python
-def parse_list_of_items(data: bytes, item_parser_func: Callable) -> List[Any]:
-    parser_name = item_parser_func.__name__
-    
-    # Step 1: Check if this is a fixed-size structure
-    if parser_name in fixed_size_parsers:
-        item_size = fixed_size_parsers[parser_name]
-        num_items = len(data) // item_size
-        
-        # Parse each fixed-size chunk directly
-        for i in range(num_items):
-            item_data = data[i*item_size : (i+1)*item_size]
-            parsed = item_parser_func(item_data)
-            items.append(parsed)
-        return items
-    
-    # Step 2: Variable-size structures use offset tables
-    first_offset = read_uint32_at(data, 0)
-    
-    # Validate offset table
-    if first_offset < 4 or first_offset > len(data):
-        # Invalid offset table - this might be fixed-size data!
-        print(f"Invalid offset table for {parser_name}, first_offset={first_offset}")
-        return fallback_parsing(data, item_parser_func)
-    
-    # Parse using offset table...
-```
-
-### Common Parsing Errors and Solutions
-
-**Error**: `Invalid offset table for parse_deposit`
-**Cause**: Deposits treated as variable-size when they're fixed-size
-**Solution**: Add `'parse_deposit': 1240` to `fixed_size_parsers`
-
-**Error**: `Invalid offset table for parse_voluntary_exit`  
-**Cause**: Voluntary exits treated as variable-size when they're fixed-size
-**Solution**: Add `'parse_voluntary_exit': 112` to `fixed_size_parsers`
-
-**Error**: Attestations parsing incorrectly
-**Cause**: Attestations are truly variable-size and need offset table parsing
-**Solution**: Keep attestations OUT of `fixed_size_parsers` - they use offsets correctly
-
 ## Parsing Implementation Guide
 
 ### 1. Era File Navigation 
 ```python
-# New approach using EraReader class
+# Using EraReader class
 from era_parser.ingestion import EraReader
 
 def read_era_file(filepath: str, network: str = None):
@@ -404,70 +346,55 @@ def read_era_file(filepath: str, network: str = None):
     block_records = era_reader.get_block_records()
     
     return era_info, stats, block_records
-
-# EraReader internally handles:
-# - Network detection from filename
-# - Reading and parsing e2store records
-# - Extracting slot numbers from compressed blocks
-# - Providing convenient access methods
 ```
 
-### 2. Block Extraction (New Modular Structure)
+### 2. Block Extraction with Unified Processing
 ```python
-# New approach using EraReader and BlockParser classes
-from era_parser.ingestion import EraReader
-from era_parser.parsing import BlockParser
+# Using EraProcessor with unified architecture
+from era_parser.core import EraProcessor
 
 def extract_block(era_file: str, target_slot: int, network: str = None):
-    # Use EraReader to read era file
-    era_reader = EraReader(era_file, network)
+    # Use EraProcessor for unified processing
+    processor = EraProcessor()
+    processor.setup(era_file, network)
     
-    # Get all block records
-    block_records = era_reader.get_block_records()
+    # Parse single block
+    return processor.parse_single_block(target_slot)
+
+def process_era_file(era_file: str, command: str, output_file: str, export_type: str = "file"):
+    # Unified processing approach
+    processor = EraProcessor()
+    processor.setup(era_file)
     
-    # Find target block
-    for slot, compressed_data in block_records:
-        if slot == target_slot:
-            # Use BlockParser to parse the block
-            block_parser = BlockParser(network or era_reader.network)
-            return block_parser.parse_block(compressed_data, slot)
-    
-    return None
+    # Process with command
+    success = processor.process_single_era(command, output_file, separate_files=False, export_type=export_type)
+    return success
 ```
 
-### 3. Fork-Aware Field Parsing 
+### 3. Fork-Aware Field Parsing with Schema Declaration
 ```python
-# New modular approach using fork-specific parsers
-from era_parser.parsing.block_parser import BlockParser
+# Using declarative schema approach
 from era_parser.parsing.forks import get_fork_parser
+from era_parser.parsing.block_parser import BlockParser
 
-def parse_block_with_new_structure(compressed_data: bytes, slot: int, network: str):
+def parse_block_with_schema(compressed_data: bytes, slot: int, network: str):
     # Main block parser coordinates the process
     block_parser = BlockParser(network)
     return block_parser.parse_block(compressed_data, slot)
 
-# Inside BlockParser.parse_block():
-def parse_block(self, compressed_data: bytes, slot: int):
-    # Decompress data
-    decompressed_data = decompress_snappy_framed(compressed_data)
-    
-    # Determine fork
-    fork = get_fork_by_slot(slot, self.network)
-    
-    # Get fork-specific parser
-    fork_parser = get_fork_parser(fork)
-    
-    # Parse body using fork-specific logic
-    body = fork_parser.parse_body(message_data[body_offset:])
+# Fork parsers now use declarative schema:
+class AltairParser(Phase0Parser):
+    BODY_SCHEMA = [
+        ('fixed', 'sync_aggregate', 160),  # Fixed 160-byte sync aggregate
+    ]
 
-# Each fork parser implements parse_body() differently:
-class AltairParser(BaseForkParser):
-    def parse_body(self, body_data: bytes) -> Dict[str, Any]:
-        # Fork-specific parsing logic here
-        pass
+class BellatrixParser(AltairParser):
+    BODY_SCHEMA = AltairParser.BODY_SCHEMA + [
+        ('variable', 'execution_payload', 'parse_execution_payload_bellatrix'),
+    ]
 ```
 
-### 4. Enhanced Attester Slashing Parsing
+### 4. Enhanced Attester Slashing Parsing with Self-Describing Items
 
 ```python
 def parse_attester_slashing(self, data: bytes) -> Optional[Dict[str, Any]]:
@@ -498,48 +425,21 @@ def parse_attester_slashing(self, data: bytes) -> Optional[Dict[str, Any]]:
     except Exception as e:
         return None
 
-def parse_indexed_attestation(self, data: bytes) -> Optional[Dict[str, Any]]:
-    """Parse IndexedAttestation with validator indices array"""
+# Self-describing item parsers with ssz_size attribute
+def parse_deposit(self, data: bytes) -> Optional[Dict[str, Any]]:
+    """Parse a single deposit"""
     try:
-        # Read offset for attesting_indices
-        indices_offset = read_uint32_at(data, 0)
+        if len(data) < 1240:
+            return None
         
-        # Parse AttestationData (fixed 128 bytes)
-        att_data_raw = data[4:132]
-        attestation_data = {
-            "slot": str(read_uint64_at(att_data_raw, 0)),
-            "index": str(read_uint64_at(att_data_raw, 8)),
-            "beacon_block_root": "0x" + att_data_raw[16:48].hex(),
-            "source": {
-                "epoch": str(read_uint64_at(att_data_raw, 48)),
-                "root": "0x" + att_data_raw[56:88].hex()
-            },
-            "target": {
-                "epoch": str(read_uint64_at(att_data_raw, 88)),
-                "root": "0x" + att_data_raw[96:128].hex()
-            }
-        }
+        # Parse proof and deposit data
+        # ... implementation
         
-        # Parse signature (96 bytes)
-        signature = "0x" + data[132:228].hex()
-        
-        # Parse attesting_indices (variable length list)
-        indices_data = data[indices_offset:]
-        attesting_indices = []
-        
-        # Parse as consecutive uint64 values
-        for i in range(0, len(indices_data) - 7, 8):
-            index = read_uint64_at(indices_data, i)
-            attesting_indices.append(str(index))
-        
-        return {
-            "attesting_indices": attesting_indices,  # This is the key enhancement!
-            "data": attestation_data,
-            "signature": signature
-        }
-        
-    except Exception:
+    except Exception as e:
         return None
+
+# Set SSZ size for fixed-size items
+parse_deposit.ssz_size = 1240
 ```
 
 ## Tools & Utilities
@@ -570,41 +470,36 @@ zcli convert deneb BeaconBlockBody block.ssz block.json
 
 ### 3. Slot/Era Calculation 
 ```python
-# New modular config system
+# Using modular config system
 from era_parser.config import get_fork_by_slot, get_network_config
+from era_parser.core.era_slot_calculator import EraSlotCalculator
 
 def era_info(slot: int, network: str = 'mainnet'):
-    # Get network configuration
-    config = get_network_config(network)
+    # Get era range
+    era_number = EraSlotCalculator.get_era_from_slot(network, slot)
+    start_slot, end_slot = EraSlotCalculator.get_era_slot_range(network, era_number)
     
-    era = slot // config['SLOTS_PER_HISTORICAL_ROOT']
-    era_start = era * config['SLOTS_PER_HISTORICAL_ROOT']
-    era_end = era_start + config['SLOTS_PER_HISTORICAL_ROOT'] - 1
+    # Get network and fork info
+    config = get_network_config(network)
     epoch = slot // config['SLOTS_PER_EPOCH']
     fork = get_fork_by_slot(slot, network)
     
     print(f"Slot {slot} ({network}):")
-    print(f"  Era: {era} (slots {era_start}-{era_end})")
+    print(f"  Era: {era_number} (slots {start_slot}-{end_slot})")
     print(f"  Epoch: {epoch}")
     print(f"  Fork: {fork}")
-
-# Access network configurations
-from era_parser.config.networks import NETWORK_CONFIGS
-print("Available networks:", list(NETWORK_CONFIGS.keys()))
 ```
 
 ### 4. Fixed-Size Field Reference 
 ```python
-# Fixed-size items handled by parse_list_of_items in ssz_utils.py
-from era_parser.parsing.ssz_utils import parse_list_of_items
-
+# Self-describing parsers in parsing/forks/base.py
 FIELD_SIZES = {
     # Fixed-size fields (embedded inline)
     "sync_aggregate": 160,  # 64 + 96 bytes
     
-    # Fixed-size items (parsed without offset tables)
+    # Fixed-size items (parsed without offset tables via ssz_size attribute)
     "withdrawal": 44,           # 8+8+20+8 bytes
-    "deposit": 1240,            # 1056+184 bytes (THE CRITICAL FIX!)
+    "deposit": 1240,            # 1056+184 bytes
     "voluntary_exit": 112,      # 8+8+96 bytes  
     "kzg_commitment": 48,       # 48 bytes
     "deposit_request": 192,     # 48+32+8+96+8 bytes
@@ -612,19 +507,18 @@ FIELD_SIZES = {
     "consolidation_request": 116, # 20+48+48 bytes
 }
 
-# The new parser automatically handles these in fork-specific parsers:
-# - AltairParser handles sync_aggregate
-# - CapellaParser adds withdrawal parsing  
-# - ElectraParser adds execution request parsing
-# - ALL parsers now handle deposits correctly!
+# Parsers automatically handle these via ssz_size attribute:
+parse_deposit.ssz_size = 1240
+parse_withdrawal.ssz_size = 44
+parse_voluntary_exit.ssz_size = 112
 ```
 
 ### 5. Parsing Validation Tools
 
 ```python
-# Test fixed-size parsing
-def validate_fixed_size_parsing():
-    """Validate that fixed-size structures parse correctly"""
+# Test self-describing parsing
+def validate_self_describing_parsing():
+    """Validate that self-describing structures parse correctly"""
     
     # Test deposit parsing (1240 bytes)
     test_deposit_data = b'\x00' * 1240  # Mock 1240-byte deposit
@@ -641,17 +535,17 @@ def validate_fixed_size_parsing():
     withdrawals = parse_list_of_items(test_withdrawal_data, parse_withdrawal)
     assert len(withdrawals) == 1, f"Expected 1 withdrawal, got {len(withdrawals)}"
     
-    print("✅ All fixed-size parsing tests passed!")
+    print("✅ All self-describing parsing tests passed!")
 
 # Test variable-size parsing
 def validate_variable_size_parsing():
     """Validate that variable-size structures still use offset tables"""
     
-    # Attestations should NOT be in fixed_size_parsers
-    assert 'parse_attestation' not in fixed_size_parsers
+    # Attestations should NOT have ssz_size attribute
+    assert not hasattr(parse_attestation, 'ssz_size')
     
-    # Attester slashings should NOT be in fixed_size_parsers  
-    assert 'parse_attester_slashing' not in fixed_size_parsers
+    # Attester slashings should NOT have ssz_size attribute
+    assert not hasattr(parse_attester_slashing, 'ssz_size')
     
     print("✅ Variable-size parsing validation passed!")
 ```
@@ -669,15 +563,15 @@ Use the era number to find valid slots within that era's range.
 ### 3. Determine the Fork
 Calculate the epoch from your target slot to determine which fork structure to expect.
 
-### 4. Test the Parser with Fixed-Size Awareness
+### 4. Test the Parser with Unified Processing
 ```bash
-# Test basic parsing (should no longer show offset table errors)
+# Test basic parsing (using unified processor)
 era-parser your-era-file.era block <target_slot>
 
-# Test full data extraction (includes enhanced attester slashing data)
+# Test full data extraction (using declarative schemas)
 era-parser your-era-file.era all-blocks test_output.json --separate
 
-# Test ClickHouse export (with updated schema)
+# Test ClickHouse export (with unified state management)
 era-parser your-era-file.era all-blocks --export clickhouse
 ```
 
@@ -719,7 +613,7 @@ Make sure your parser handles the correct fork for the era you're testing. Diffe
 If you still see parsing errors:
 
 ```python
-# Check if new data types need to be added to fixed_size_parsers
+# Check if new data types need to be added to self-describing parsers
 def debug_unknown_structure(data: bytes, parser_name: str):
     """Debug unknown data structure to determine if it's fixed-size"""
     
@@ -746,13 +640,13 @@ def debug_unknown_structure(data: bytes, parser_name: str):
 
 ## Conclusion
 
-ERA files provide a robust archival format for Ethereum beacon chain data, but require careful handling of the evolving SSZ structure across forks. The key to successful parsing is understanding:
+ERA files provide a robust archival format for Ethereum beacon chain data, but require careful handling of the evolving SSZ structure across forks. The key to successful parsing with the new refactored system is understanding:
 
-1. **Mixed field types**: Some fields are fixed-size (embedded), others variable-size (use offsets)
-2. **Fork evolution**: Each fork adds new fields in specific positions
-3. **SSZ semantics**: Proper offset calculation and list parsing strategies
-4. **Era structure**: How slots map to eras and files
-5. **Fixed vs Variable distinction**: The critical importance of correctly identifying data structure types
-6. **Enhanced data extraction**: Capturing complete validator information in slashing events
+1. **Unified Processing**: Single `EraProcessor` coordinates all operations
+2. **Declarative Schema**: Fork parsers use schema definitions for consistency
+3. **Self-Describing Items**: Parser functions have `ssz_size` attributes for fixed-size structures
+4. **Unified State Management**: `EraStateManager` handles all completion tracking
+5. **Single Timestamp**: All records use unified timestamp for efficient partitioning
+6. **Enhanced Data Extraction**: Complete validator information in slashing events
 
-The **fixed-size parser registry** is crucial for preventing offset table errors with structures like deposits, withdrawals, and voluntary exits. The **enhanced attester slashing parsing** enables comprehensive validator tracking and slashing analysis.
+The **self-describing parser system** with `ssz_size` attributes eliminates offset table errors with structures like deposits, withdrawals, and voluntary exits. The **unified processing architecture** provides consistent handling across all networks and forks, while the **declarative schema approach** makes fork parsers easier to maintain and extend.

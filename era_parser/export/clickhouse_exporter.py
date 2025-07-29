@@ -1,7 +1,3 @@
-"""
-Simplified ClickHouse exporter with atomic era processing
-"""
-
 import json
 import logging
 import time
@@ -15,7 +11,7 @@ from .era_state_manager import EraStateManager
 logger = logging.getLogger(__name__)
 
 class ClickHouseExporter(BaseExporter):
-    """Simplified ClickHouse exporter with atomic era processing"""
+    """Simplified ClickHouse exporter with unified state management"""
 
     def __init__(self, era_info: Dict[str, Any], era_file_path: str = None):
         """Initialize ClickHouse exporter"""
@@ -25,7 +21,7 @@ class ClickHouseExporter(BaseExporter):
         self.state_manager = EraStateManager()
         self.network = era_info.get('network', 'mainnet')
         
-        # Get era_number from era_info (this should be correct)
+        # Get era_number from era_info
         self.era_number = era_info.get('era_number', 0)
         
         print(f"🔧 ClickHouse Exporter initialized for era {self.era_number}, network {self.network}")
@@ -40,7 +36,7 @@ class ClickHouseExporter(BaseExporter):
 
     def load_all_data_types(self, all_data: Dict[str, List[Dict[str, Any]]]):
         """
-        Load all data types atomically
+        Load all data types atomically using unified state management
         """
         if not all_data:
             logger.warning("No data to load")
@@ -49,10 +45,10 @@ class ClickHouseExporter(BaseExporter):
         print(f"🔄 Processing era {self.era_number} atomically")
         
         try:
-            # 1. Clean FIRST (before marking as processing)
+            # 1. Clean FIRST using unified state manager
             self.state_manager.clean_era_data_if_needed(self.era_number, self.network)
             
-            # 2. Then mark as processing
+            # 2. Mark as processing using unified state manager
             self.state_manager.record_era_start(self.era_number, self.network)
             
             # 3. Process all datasets
@@ -72,7 +68,7 @@ class ClickHouseExporter(BaseExporter):
                     total_records += records_loaded
                     print(f"   ✅ {dataset}: {records_loaded} records loaded")
             
-            # 4. Mark as completed
+            # 4. Mark as completed using unified state manager
             self.state_manager.record_era_completion(
                 self.era_number, self.network, datasets_processed, total_records
             )
@@ -80,7 +76,7 @@ class ClickHouseExporter(BaseExporter):
             print(f"✅ Era {self.era_number} completed: {total_records} records, {len(datasets_processed)} datasets")
             
         except Exception as e:
-            # 5. Mark as failed and clean up
+            # 5. Mark as failed using unified state manager
             print(f"❌ Era {self.era_number} failed: {e}")
             self.state_manager.record_era_failure(self.era_number, self.network, str(e))
             raise
@@ -99,7 +95,7 @@ class ClickHouseExporter(BaseExporter):
             raise
 
     def is_era_completed(self) -> bool:
-        """Check if era is already completed"""
+        """Check if era is already completed using unified state manager"""
         completed_eras = self.state_manager.get_completed_eras(self.network, self.era_number, self.era_number)
         return self.era_number in completed_eras
 

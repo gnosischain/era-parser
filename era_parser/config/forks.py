@@ -1,5 +1,3 @@
-"""Fork configuration and detection logic"""
-
 from .networks import get_network_config
 
 FORK_CONFIGS = {

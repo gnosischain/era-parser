@@ -1,21 +1,25 @@
-"""Remote era processing commands"""
-
 from typing import List, Tuple, Optional
 
 from .base import BaseCommand
 from ..ingestion.remote_downloader import get_remote_era_downloader
 
 class RemoteCommand(BaseCommand):
-    """Handler for remote era processing operations"""
+    """Handler for remote era processing operations using unified state management"""
     
     def execute(self, args: List[str]) -> None:
         """Execute remote processing command"""
+        print(f"🔍 RemoteCommand.execute() received args: {args}")
+        
         if not args:
             print("❌ Remote command requires arguments")
             return
         
         # Check if this is a utility command that starts with --
-        if args[0].startswith('--'):
+        first_arg = args[0]
+        print(f"🔍 First arg: '{first_arg}', starts with --: {first_arg.startswith('--')}")
+        
+        if first_arg.startswith('--'):
+            print(f"🔍 Taking utility command path for: {first_arg}")
             if args[0] == "--remote-progress":
                 self._handle_remote_progress(args[1:])
             elif args[0] == "--remote-clear":
@@ -31,6 +35,7 @@ class RemoteCommand(BaseCommand):
             return
         
         # Standard remote processing: network era_range [command] [options]
+        print(f"🔍 Taking standard remote processing path")
         self._handle_remote_processing(args)
     
     def _handle_remote_progress(self, args: List[str]) -> None:
@@ -41,8 +46,10 @@ class RemoteCommand(BaseCommand):
         network = args[0]
         
         try:
-            downloader = get_remote_era_downloader()
+            downloader = get_remote_era_downloader(network)
             downloader.network = network
+            downloader.progress_file = downloader.download_dir / f".era_progress_{network}.json"
+            downloader.progress_data = downloader._load_progress()
             progress = downloader.list_progress()
             
             print(f"📊 Remote Processing Progress ({network})")
@@ -65,9 +72,10 @@ class RemoteCommand(BaseCommand):
         network = args[0]
         
         try:
-            downloader = get_remote_era_downloader()
+            downloader = get_remote_era_downloader(network)
             downloader.network = network
-            downloader.clear_progress()
+            downloader.progress_file = downloader.download_dir / f".era_progress_{network}.json"
+            downloader.progress_data = downloader._load_progress()
             print(f"✅ Cleared progress for {network}")
         except ValueError as e:
             print(f"❌ Configuration error: {e}")
@@ -94,14 +102,14 @@ class RemoteCommand(BaseCommand):
         command = args[2]
         base_output = args[3] if len(args) > 3 and not args[3].startswith('--') else "output"
         
-        # Parse flags (removed resume)
+        # Parse flags
         flags, _ = self.parse_flags(args[3:])
         separate_files = flags['separate']
         force = '--force' in args
         export_type = self.get_export_type(flags)
         
         try:
-            downloader = get_remote_era_downloader()
+            downloader = get_remote_era_downloader(network)
             downloader.network = network
             
             result = downloader.process_era_range(
@@ -109,7 +117,7 @@ class RemoteCommand(BaseCommand):
                 command=command,
                 base_output=base_output,
                 separate_files=separate_files,
-                force=force,  # Removed resume parameter
+                force=force,
                 export_type=export_type
             )
             
@@ -126,63 +134,12 @@ class RemoteCommand(BaseCommand):
  
     def _handle_download_only(self, network: str, era_range: str) -> None:
         """Handle download-only mode"""
-        result = self._process_remote_eras(
-            network=network,
-            era_range=era_range,
-            command="",
-            base_output="",
-            download_only=True
-        )
-        if result["success"]:
-            print(f"🎉 Downloaded {result['downloaded_count']}/{result['total_available']} era files")
-    
-    def _parse_era_range(self, era_range: str) -> Tuple[int, Optional[int]]:
-        """Parse era range string into start and end values"""
-        if '+' in era_range:
-            start_era = int(era_range.replace('+', ''))
-            return start_era, None
-        elif '-' in era_range:
-            start_str, end_str = era_range.split('-', 1)
-            return int(start_str), int(end_str)
-        else:
-            era = int(era_range)
-            return era, era
-    
-    def _process_remote_eras(self, network: str, era_range: str, command: str, 
-                           base_output: str, separate_files: bool = False,
-                           download_only: bool = False, resume: bool = False,
-                           export_type: str = "file") -> dict:
-        """Process remote era files"""
-        print(f"🌐 Remote Era Processing")
-        print(f"   Network: {network}")
-        print(f"   Era range: {era_range}")
-        print(f"   Command: {command}")
-        print(f"   Export type: {export_type}")
-        
-        start_era, end_era = self._parse_era_range(era_range)
+        print(f"📥 Download-only mode for {network} era range {era_range}")
         
         try:
-            downloader = get_remote_era_downloader()
-            downloader.network = network
-        except ValueError as e:
-            print(f"❌ Configuration error: {e}")
-            print("💡 Make sure to set ERA_BASE_URL environment variable")
-            return {"success": False, "error": str(e)}
-        
-        if export_type == "clickhouse":
-            try:
-                from ..export.clickhouse_service import ClickHouseService
-                ch_service = ClickHouseService()
-                processed_eras = set(ch_service.get_processed_eras(network, start_era, end_era))
-                print(f"📋 Found {len(processed_eras)} already processed eras in ClickHouse")
-            except Exception as e:
-                print(f"⚠️  Could not check ClickHouse status: {e}")
-                processed_eras = set()
-        else:
-            processed_eras = set()
-        
-        if download_only:
-            print("📥 Download-only mode")
+            downloader = get_remote_era_downloader(network)
+            
+            start_era, end_era = self._parse_era_range(era_range)
             available_eras = downloader.discover_era_files(start_era, end_era)
             
             downloaded_count = 0
@@ -194,26 +151,38 @@ class RemoteCommand(BaseCommand):
                 else:
                     print(f"❌ Failed to download era {era_number}")
             
-            return {
-                "success": True,
-                "mode": "download_only",
-                "downloaded_count": downloaded_count,
-                "total_available": len(available_eras)
-            }
-        else:
-            return downloader.process_era_range(
-                start_era=start_era,
-                end_era=end_era,
-                command=command,
-                base_output=base_output,
-                separate_files=separate_files,
-                resume=resume,
-                export_type=export_type,
-                processed_eras=processed_eras
-            )
+            print(f"🎉 Downloaded {downloaded_count}/{len(available_eras)} era files")
+            
+        except Exception as e:
+            self.handle_error(e, "download-only processing")
+    
+    def _parse_era_range(self, era_range: str) -> Tuple[int, Optional[int]]:
+        """Parse era range string into start and end values"""
+        try:
+            # Handle leading zeros and various formats
+            era_range = era_range.strip()
+            
+            if '+' in era_range:
+                start_str = era_range.replace('+', '').strip()
+                start_era = int(start_str)
+                print(f"📊 Parsed era range '{era_range}' as: start={start_era}, end=None (open-ended)")
+                return start_era, None
+            elif '-' in era_range:
+                start_str, end_str = era_range.split('-', 1)
+                start_era, end_era = int(start_str.strip()), int(end_str.strip())
+                print(f"📊 Parsed era range '{era_range}' as: start={start_era}, end={end_era}")
+                return start_era, end_era
+            else:
+                era = int(era_range.strip())
+                print(f"📊 Parsed era range '{era_range}' as: start={era}, end={era} (single era)")
+                return era, era
+        except (ValueError, IndexError) as e:
+            print(f"❌ Invalid era range format: '{era_range}'")
+            print(f"Expected formats: '1000', '1000-2000', or '1000+'")
+            raise ValueError(f"Invalid era range format: '{era_range}'") from e
 
     def _handle_clean_failed(self, args: List[str]) -> None:
-        """Handle cleaning failed eras"""
+        """Handle cleaning failed eras using unified state manager"""
         if not self.validate_required_args(args, 1, "era-parser --remote --clean-failed <network>"):
             return
         
@@ -234,7 +203,7 @@ class RemoteCommand(BaseCommand):
             print(f"❌ Failed to clean failed eras: {e}")
 
     def _handle_force_clean(self, args: List[str]) -> None:
-        """Handle force cleaning specific eras"""
+        """Handle force cleaning specific eras using unified state manager"""
         if not self.validate_required_args(args, 2, "era-parser --remote --force-clean <network> <era_range>"):
             return
         
@@ -252,7 +221,7 @@ class RemoteCommand(BaseCommand):
             cleaned_count = 0
             for era_number in range(start_era, end_era + 1):
                 try:
-                    state_manager.clean_era_data(era_number, network)
+                    state_manager.clean_era_completely(network, era_number)
                     cleaned_count += 1
                 except Exception as e:
                     print(f"⚠️  Could not clean era {era_number}: {e}")
@@ -263,7 +232,7 @@ class RemoteCommand(BaseCommand):
             print(f"❌ Failed to force clean eras: {e}")
 
     def _handle_optimize_tables(self, args: List[str]) -> None:
-        """Handle table optimization"""
+        """Handle table optimization using unified state manager"""
         try:
             from ..export.era_state_manager import EraStateManager
             state_manager = EraStateManager()

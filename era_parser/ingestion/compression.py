@@ -1,5 +1,3 @@
-"""Compression utilities for era files"""
-
 import struct
 import snappy
 

@@ -1,5 +1,3 @@
-"""Optimized ClickHouse service with migration support and single timestamp - SIMPLIFIED BATCHING"""
-
 import os
 import logging
 import hashlib
@@ -418,7 +416,7 @@ class ClickHouseService:
         return column_mapping.get(table_name, [])
 
     def get_processed_eras(self, network: str, start_era: int = None, end_era: int = None) -> List[int]:
-        """Get list of successfully processed era numbers - SIMPLE FIX: just catch exception"""
+        """Get list of successfully processed era numbers"""
         try:
             query = f"""
             SELECT era_number 
@@ -447,7 +445,7 @@ class ClickHouseService:
             return []
 
     def get_failed_eras(self, network: str) -> List[Dict]:
-        """Get list of failed era processing attempts - SIMPLE FIX: just catch exception"""
+        """Get list of failed era processing attempts"""
         try:
             result = self.client.query(f"""
                 SELECT era_number, era_filename, created_at, error_message, dataset
