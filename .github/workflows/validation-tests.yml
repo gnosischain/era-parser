@@ -64,7 +64,7 @@ jobs:
         echo "Example: tests/test_data/mainnet_12345_rpc.json and tests/test_data/mainnet_12345_era.json"
     
     - name: Upload test results on failure
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: failure() && steps.check_data.outputs.has_test_data == 'true'
       with:
         name: validation-failure-python-${{ matrix.python-version }}
