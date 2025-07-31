@@ -23,7 +23,7 @@ pip install -e .
 
 #### Docker Installation
 ```bash
-git clone https://github.com/your-org/era-parser.git
+git clone https://github.com/gnosischain/era-parser.git
 cd era-parser
 cp .env.example .env  # Configure your settings
 docker build -t era-parser:latest .
@@ -132,7 +132,9 @@ Network configuration is automatic based on era filename.
 - `bls-changes` - BLS to execution changes (Capella+)
 - `execution-payloads` - Execution layer payloads (Bellatrix+)
 - `blob-kzg-commitments` - Blob KZG commitments (Deneb+)
-- `execution-requests` - Execution requests (Electra+)
+- `deposit-requests` - Deposit requests (Electra+)
+- `withdrawal-requests` - Withdrawal requests (Electra+)
+- `consolidation-requests` - Consolidation requests (Electra+)
 
 ## 🎯 Usage Examples
 
@@ -142,6 +144,10 @@ Network configuration is automatic based on era filename.
 era-parser --remote gnosis 1000-1100 attestations --export clickhouse
 era-parser --remote gnosis 1000-1100 deposits --export clickhouse
 era-parser --remote gnosis 1000-1100 withdrawals --export clickhouse
+
+# Extract Electra execution requests
+era-parser --remote mainnet 1400+ deposit-requests --export clickhouse
+era-parser --remote mainnet 1400+ consolidation-requests --export clickhouse
 
 # Continuous monitoring
 era-parser --remote gnosis 2500+ all-blocks --export clickhouse
@@ -216,10 +222,119 @@ era-parser/
 └── parsing/            # Block parsing with fork-specific logic
 ```
 
+
+### Key Features
+
+- **Single Timestamp**: All tables use `timestamp_utc` for efficient time-based partitioning
+- **Normalized Structure**: Each data type gets its own optimized table
+- **Separate Execution Requests**: Electra+ execution requests are stored in type-specific tables
+- **Atomic Processing**: Each era is processed atomically with unified state tracking
+- **Deduplication**: ReplacingMergeTree handles duplicate data automatically
+
+## 🚀 Performance Features
+
+### Unified Processing
+- **Single Global Batch Size**: 100,000 records for optimal performance
+- **Streaming Insert**: Large datasets automatically use streaming
+- **Memory Efficient**: Constant memory usage per era
+- **Connection Optimization**: Cloud-optimized ClickHouse settings
+
+### State Management
+- **Unified Era Tracking**: Single state manager handles all completion tracking
+- **Atomic Operations**: Each era is either complete or failed, no partial states
+- **Force Mode**: Clean and reprocess data ranges completely
+- **Auto-Resume**: Normal mode skips completed eras automatically
+
+### Remote Processing
+- **S3 Optimization**: Bulk discovery of 1000+ files in seconds
+- **Parallel Downloads**: Concurrent processing with retry logic
+- **Smart Termination**: Automatic detection of latest available eras
+- **Efficient Storage**: Optional cleanup after processing
+
+## 🔄 Migration System
+
+Era Parser includes a complete database migration system:
+
+```bash
+# Check migration status
+era-parser --migrate status
+
+# Run all pending migrations
+era-parser --migrate run
+
+# Run migrations to specific version
+era-parser --migrate run 002
+
+# List available migrations
+era-parser --migrate list
+```
+
+**Available Migrations:**
+- `001`: Initial beacon chain tables
+- `002`: Performance optimizations and era completion tracking
+- `003`: Separate execution request tables (Electra+)
+
+## 🌐 Network Support
+
+| Network | Phase 0 | Altair | Bellatrix | Capella | Deneb | Electra | Status |
+|---------|---------|--------|-----------|---------|-------|---------|--------|
+| **Mainnet** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Full |
+| **Gnosis** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Full |
+| **Sepolia** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Full |
+
+**Fork-Specific Features:**
+- **Altair+**: Sync committee data in separate table
+- **Bellatrix+**: Execution payloads and transaction data
+- **Capella+**: Withdrawal data and BLS changes
+- **Deneb+**: Blob KZG commitments and blob gas tracking
+- **Electra+**: Separate execution request tables (deposits, withdrawals, consolidations)
+
+
+## 🛠️ Troubleshooting
+
+### Common Issues
+
+**Missing Tables Error**:
+```bash
+# Run migrations to create new tables
+era-parser --migrate run
+```
+
+**State Management Issues**:
+```bash
+# Check era completion status
+era-parser --era-status gnosis
+
+# Clean failed eras
+era-parser --clean-failed-eras gnosis
+
+# Force clean specific range
+era-parser --remote --force-clean gnosis 1082-1100
+```
+
+**Processing Performance**:
+```bash
+# Monitor processing with unified state tracking
+era-parser --remote gnosis 1000+ all-blocks --export clickhouse
+
+# The system automatically:
+# - Skips completed eras (normal mode)
+# - Uses 100k batch size for optimal performance  
+# - Streams large datasets automatically
+# - Provides atomic era processing
+```
+
+## 📚 Documentation
+
+- [**Setup Guide**](docs/SETUP.md) - Complete installation and configuration
+- [**ClickHouse Integration**](docs/CLICKHOUSE.md) - Database setup and optimization
+- [**Remote Processing**](docs/REMOTE_PROCESSING.md) - Advanced remote era processing
+- [**Era File Format**](docs/ERA_FILE_FORMAT.md) - Technical era file specification
+- [**Parsed Fields**](docs/PARSED_FIELDS.md) - Complete field documentation
+- [**Network & Forks**](docs/NETWORK_FORKS.md) - Supported networks and forks
+- [**Development Guide**](docs/DEVELOPMENT.md) - Contributing and development setup
+
 ## 📄 License
 
 MIT License - see LICENSE file for details.
 
----
-
-**Need help?** Check our [documentation](docs/) or open an issue on GitHub.

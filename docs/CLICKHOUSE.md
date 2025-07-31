@@ -239,7 +239,7 @@ PARTITION BY toStartOfMonth(timestamp_utc)
 ORDER BY (slot, change_index, validator_index);
 
 -- Blob KZG commitments (Deneb+)
-CREATE TABLE beacon_chain.blob_kzg_commitments (
+CREATE TABLE beacon_chain.blob_commitments (
     slot UInt64,
     commitment_index UInt64,
     commitment String,
@@ -249,17 +249,51 @@ CREATE TABLE beacon_chain.blob_kzg_commitments (
 PARTITION BY toStartOfMonth(timestamp_utc)
 ORDER BY (slot, commitment_index);
 
--- Execution requests (Electra+)
-CREATE TABLE beacon_chain.execution_requests (
+-- NEW: Separate Execution Request Tables (Electra+)
+
+-- Deposit requests (EIP-6110)
+CREATE TABLE beacon_chain.deposit_requests (
     slot UInt64,
     request_index UInt64,
-    request_type String,
-    request_data String,
+    pubkey String,
+    withdrawal_credentials String,
+    amount UInt64,
+    signature String,
+    deposit_request_index UInt64,
     timestamp_utc DateTime DEFAULT toDateTime(0),
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
 PARTITION BY toStartOfMonth(timestamp_utc)
-ORDER BY (slot, request_index);
+ORDER BY (slot, request_index, pubkey)
+COMMENT 'EIP-6110: Validator deposit requests from execution layer';
+
+-- Withdrawal requests (EIP-7002)
+CREATE TABLE beacon_chain.withdrawal_requests (
+    slot UInt64,
+    request_index UInt64,
+    source_address String,
+    validator_pubkey String,
+    amount UInt64,
+    timestamp_utc DateTime DEFAULT toDateTime(0),
+    insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
+) ENGINE = ReplacingMergeTree(insert_version)
+PARTITION BY toStartOfMonth(timestamp_utc)
+ORDER BY (slot, request_index, source_address)
+COMMENT 'EIP-7002: Validator withdrawal requests from execution layer';
+
+-- Consolidation requests (EIP-7251)
+CREATE TABLE beacon_chain.consolidation_requests (
+    slot UInt64,
+    request_index UInt64,
+    source_address String,
+    source_pubkey String,
+    target_pubkey String,
+    timestamp_utc DateTime DEFAULT toDateTime(0),
+    insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
+) ENGINE = ReplacingMergeTree(insert_version)
+PARTITION BY toStartOfMonth(timestamp_utc)
+ORDER BY (slot, request_index, source_address)
+COMMENT 'EIP-7251: Validator consolidation requests from execution layer';
 
 -- Era processing state tracking
 CREATE TABLE beacon_chain.era_completion (
@@ -295,7 +329,7 @@ era-parser --remote gnosis 1000-1100 all-blocks --export clickhouse --force
 
 **Force Mode Process:**
 1. Identifies eras with existing data
-2. Cleans all data for those eras from all tables
+2. Cleans all data for those eras from all tables (including execution request tables)
 3. Removes completion records  
 4. Processes all eras from scratch
 
@@ -344,6 +378,98 @@ ORDER BY era_number;
 ```
 
 ## Data Analysis Examples
+
+### Execution Requests Analysis (Electra+)
+
+```sql
+-- Deposit request trends
+SELECT 
+    toStartOfDay(timestamp_utc) as day,
+    count() as deposit_requests,
+    sum(amount) as total_amount_gwei,
+    count(DISTINCT pubkey) as unique_validators
+FROM deposit_requests 
+WHERE timestamp_utc >= now() - INTERVAL 7 DAY
+GROUP BY day
+ORDER BY day;
+
+-- Top addresses by consolidation requests
+SELECT 
+    source_address,
+    count() as consolidation_count,
+    count(DISTINCT source_pubkey) as validators_consolidated,
+    count(DISTINCT target_pubkey) as target_validators,
+    min(timestamp_utc) as first_consolidation,
+    max(timestamp_utc) as last_consolidation
+FROM consolidation_requests
+WHERE timestamp_utc >= now() - INTERVAL 30 DAY
+GROUP BY source_address
+ORDER BY consolidation_count DESC
+LIMIT 20;
+
+-- Withdrawal request patterns
+SELECT 
+    toHour(timestamp_utc) as hour,
+    count() as withdrawal_requests,
+    avg(amount) as avg_amount_gwei,
+    count(DISTINCT source_address) as unique_addresses,
+    count(DISTINCT validator_pubkey) as unique_validators
+FROM withdrawal_requests
+WHERE timestamp_utc >= now() - INTERVAL 1 DAY
+GROUP BY hour
+ORDER BY hour;
+
+-- Cross-request type analysis
+SELECT 
+    'deposit_requests' as request_type,
+    count() as total_requests,
+    sum(amount) as total_amount_gwei,
+    count(DISTINCT pubkey) as unique_keys,
+    min(timestamp_utc) as earliest_request,
+    max(timestamp_utc) as latest_request
+FROM deposit_requests
+WHERE timestamp_utc >= now() - INTERVAL 7 DAY
+
+UNION ALL
+
+SELECT 
+    'withdrawal_requests' as request_type,
+    count() as total_requests,
+    sum(amount) as total_amount_gwei,
+    count(DISTINCT validator_pubkey) as unique_keys,
+    min(timestamp_utc) as earliest_request,
+    max(timestamp_utc) as latest_request
+FROM withdrawal_requests
+WHERE timestamp_utc >= now() - INTERVAL 7 DAY
+
+UNION ALL
+
+SELECT 
+    'consolidation_requests' as request_type,
+    count() as total_requests,
+    0 as total_amount_gwei,  -- No amount field for consolidations
+    count(DISTINCT source_pubkey) as unique_keys,
+    min(timestamp_utc) as earliest_request,
+    max(timestamp_utc) as latest_request
+FROM consolidation_requests
+WHERE timestamp_utc >= now() - INTERVAL 7 DAY
+
+ORDER BY total_requests DESC;
+
+-- Validator consolidation efficiency
+SELECT 
+    source_address,
+    count() as total_consolidations,
+    count(DISTINCT source_pubkey) as source_validators,
+    count(DISTINCT target_pubkey) as target_validators,
+    round(count(DISTINCT source_pubkey) * 1.0 / count(DISTINCT target_pubkey), 2) as consolidation_ratio
+FROM consolidation_requests
+WHERE timestamp_utc >= now() - INTERVAL 30 DAY
+GROUP BY source_address
+HAVING total_consolidations >= 5
+ORDER BY consolidation_ratio DESC
+LIMIT 20;
+```
 
 ### Block Analysis
 ```sql
@@ -413,19 +539,22 @@ SELECT
     ep.gas_used,
     round((ep.gas_used * 100.0) / ep.gas_limit, 2) as gas_utilization_percent,
     ep.base_fee_per_gas,
-    ep.transactions_count
+    count(t.transaction_hash) as transaction_count
 FROM blocks b
 JOIN execution_payloads ep ON b.slot = ep.slot
+LEFT JOIN transactions t ON b.slot = t.slot
 WHERE b.timestamp_utc >= now() - INTERVAL 1 DAY
   AND ep.gas_used > 0
+GROUP BY b.slot, ep.gas_limit, ep.gas_used, ep.base_fee_per_gas
 ORDER BY gas_utilization_percent DESC
 LIMIT 100;
 ```
 
 ### Validator Analysis
 ```sql
--- Withdrawal patterns
+-- Withdrawal patterns comparison (traditional vs requests)
 SELECT 
+    'traditional_withdrawals' as withdrawal_type,
     toStartOfDay(timestamp_utc) as day,
     count() as withdrawal_count,
     sum(amount) as total_withdrawn_gwei,
@@ -434,21 +563,42 @@ SELECT
 FROM withdrawals 
 WHERE timestamp_utc >= now() - INTERVAL 7 DAY
 GROUP BY day
-ORDER BY day;
 
--- Top validators by withdrawals
+UNION ALL
+
 SELECT 
-    validator_index,
+    'withdrawal_requests' as withdrawal_type,
+    toStartOfDay(timestamp_utc) as day,
     count() as withdrawal_count,
     sum(amount) as total_withdrawn_gwei,
     avg(amount) as avg_withdrawal_gwei,
-    min(timestamp_utc) as first_withdrawal,
-    max(timestamp_utc) as last_withdrawal
-FROM withdrawals 
+    count(DISTINCT validator_pubkey) as unique_validators
+FROM withdrawal_requests 
+WHERE timestamp_utc >= now() - INTERVAL 7 DAY
+GROUP BY day
+
+ORDER BY day, withdrawal_type;
+
+-- Validator deposit comparison (traditional vs requests)
+SELECT 
+    'traditional_deposits' as deposit_type,
+    count() as deposit_count,
+    sum(amount) as total_deposited_gwei,
+    count(DISTINCT pubkey) as unique_validators,
+    avg(amount) as avg_deposit_gwei
+FROM deposits 
 WHERE timestamp_utc >= now() - INTERVAL 30 DAY
-GROUP BY validator_index
-ORDER BY total_withdrawn_gwei DESC
-LIMIT 50;
+
+UNION ALL
+
+SELECT 
+    'deposit_requests' as deposit_type,
+    count() as deposit_count,
+    sum(amount) as total_deposited_gwei,
+    count(DISTINCT pubkey) as unique_validators,
+    avg(amount) as avg_deposit_gwei
+FROM deposit_requests 
+WHERE timestamp_utc >= now() - INTERVAL 30 DAY;
 
 -- Attestation participation
 SELECT 
@@ -461,18 +611,6 @@ FROM attestations
 WHERE timestamp_utc >= now() - INTERVAL 1 DAY
 GROUP BY committee_index
 ORDER BY attestations DESC;
-
--- Validator deposits analysis
-SELECT 
-    toStartOfDay(timestamp_utc) as day,
-    count() as deposit_count,
-    sum(amount) as total_deposited_gwei,
-    count(DISTINCT pubkey) as unique_validators,
-    avg(amount) as avg_deposit_gwei
-FROM deposits 
-WHERE timestamp_utc >= now() - INTERVAL 30 DAY
-GROUP BY day
-ORDER BY day;
 
 -- Voluntary exits analysis
 SELECT 
@@ -614,7 +752,7 @@ SELECT
     count() as total_commitments,
     count(DISTINCT slot) as blocks_with_blobs,
     avg(count()) OVER () as avg_hourly_commitments
-FROM blob_kzg_commitments 
+FROM blob_commitments 
 WHERE timestamp_utc >= now() - INTERVAL 24 HOUR
 GROUP BY hour
 ORDER BY hour;
@@ -624,7 +762,7 @@ SELECT
     slot,
     count() as commitment_count,
     timestamp_utc
-FROM blob_kzg_commitments 
+FROM blob_commitments 
 WHERE timestamp_utc >= now() - INTERVAL 7 DAY
 GROUP BY slot, timestamp_utc
 ORDER BY commitment_count DESC
@@ -647,10 +785,12 @@ SELECT
     b.slot,
     b.proposer_index,
     ep.gas_used,
-    ep.transactions_count
+    count(t.transaction_hash) as transaction_count
 FROM blocks b
 JOIN execution_payloads ep ON b.slot = ep.slot
-WHERE b.timestamp_utc >= now() - INTERVAL 1 DAY;
+LEFT JOIN transactions t ON b.slot = t.slot
+WHERE b.timestamp_utc >= now() - INTERVAL 1 DAY
+GROUP BY b.slot, b.proposer_index, ep.gas_used;
 
 -- Use proper data types for large numbers
 SELECT 
@@ -659,6 +799,19 @@ SELECT
 FROM execution_payloads 
 WHERE timestamp_utc >= now() - INTERVAL 1 DAY
   AND base_fee_per_gas != '';
+
+-- Execution request optimization
+SELECT 
+    dr.slot,
+    dr.amount as deposit_amount,
+    wr.amount as withdrawal_amount,
+    cr.source_address
+FROM deposit_requests dr
+FULL OUTER JOIN withdrawal_requests wr ON dr.slot = wr.slot
+FULL OUTER JOIN consolidation_requests cr ON dr.slot = cr.slot
+WHERE dr.timestamp_utc >= now() - INTERVAL 1 DAY
+   OR wr.timestamp_utc >= now() - INTERVAL 1 DAY
+   OR cr.timestamp_utc >= now() - INTERVAL 1 DAY;
 ```
 
 ### Index Recommendations
@@ -670,6 +823,12 @@ ALTER TABLE withdrawals ADD INDEX idx_validator_time (validator_index, timestamp
 ALTER TABLE attestations ADD INDEX idx_committee_time (committee_index, timestamp_utc) TYPE minmax;
 ALTER TABLE deposits ADD INDEX idx_pubkey (pubkey) TYPE bloom_filter;
 ALTER TABLE attester_slashings ADD INDEX idx_validator_count (total_slashed_validators) TYPE minmax;
+
+-- NEW: Execution request table indexes
+ALTER TABLE deposit_requests ADD INDEX idx_pubkey_time (pubkey, timestamp_utc) TYPE minmax;
+ALTER TABLE withdrawal_requests ADD INDEX idx_address_time (source_address, timestamp_utc) TYPE minmax;
+ALTER TABLE consolidation_requests ADD INDEX idx_source_time (source_address, timestamp_utc) TYPE minmax;
+ALTER TABLE consolidation_requests ADD INDEX idx_source_pubkey (source_pubkey) TYPE bloom_filter;
 ```
 
 ### Storage Optimization
@@ -698,7 +857,7 @@ WHERE database = 'beacon_chain'
   AND active = 1
 ORDER BY table, min_date;
 
--- Table statistics
+-- Table statistics including execution request tables
 SELECT 
     table,
     count() as partitions,
@@ -717,7 +876,7 @@ ORDER BY total_rows DESC;
 
 ### Health Checks
 ```sql
--- Check recent data ingestion
+-- Check recent data ingestion (including execution requests)
 SELECT 
     table,
     max(timestamp_utc) as latest_data,
@@ -731,7 +890,11 @@ FROM (
     UNION ALL
     SELECT 'withdrawals' as table, timestamp_utc FROM withdrawals WHERE timestamp_utc >= today()
     UNION ALL
-    SELECT 'attester_slashings' as table, timestamp_utc FROM attester_slashings WHERE timestamp_utc >= today()
+    SELECT 'deposit_requests' as table, timestamp_utc FROM deposit_requests WHERE timestamp_utc >= today()
+    UNION ALL
+    SELECT 'withdrawal_requests' as table, timestamp_utc FROM withdrawal_requests WHERE timestamp_utc >= today()
+    UNION ALL
+    SELECT 'consolidation_requests' as table, timestamp_utc FROM consolidation_requests WHERE timestamp_utc >= today()
 ) 
 GROUP BY table
 ORDER BY table;
@@ -748,17 +911,7 @@ WHERE completed_at >= now() - INTERVAL 24 HOUR
 GROUP BY hour
 ORDER BY hour;
 
--- Processing lag detection
-SELECT 
-    network,
-    max(era_number) as highest_completed_era,
-    now() - max(completed_at) as time_since_last_completion
-FROM era_completion
-WHERE status = 'completed'
-GROUP BY network
-HAVING time_since_last_completion > INTERVAL 1 HOUR;
-
--- Check for data quality issues
+-- Check for data quality issues (including execution requests)
 SELECT 
     'blocks_with_zero_timestamp' as issue,
     count() as count
@@ -778,82 +931,36 @@ WHERE b.slot IS NULL
 UNION ALL
 
 SELECT 
-    'transactions_with_empty_hash' as issue,
+    'deposit_requests_with_empty_pubkey' as issue,
     count() as count
-FROM transactions 
-WHERE transaction_hash = ''
+FROM deposit_requests 
+WHERE pubkey = ''
 
 UNION ALL
 
 SELECT 
-    'attestations_future_slots' as issue,
+    'withdrawal_requests_with_zero_amount' as issue,
     count() as count
-FROM attestations 
-WHERE attestation_slot > slot
+FROM withdrawal_requests 
+WHERE amount = 0
 
 UNION ALL
 
 SELECT 
-    'attester_slashings_with_zero_validators' as issue,
+    'consolidation_requests_same_source_target' as issue,
     count() as count
-FROM attester_slashings 
-WHERE total_slashed_validators = 0;
-```
-
-### Performance Monitoring
-```sql
--- Query performance analysis
-SELECT 
-    query,
-    query_duration_ms,
-    memory_usage,
-    read_rows,
-    read_bytes,
-    written_rows,
-    user
-FROM system.query_log 
-WHERE event_time >= now() - INTERVAL 1 HOUR
-  AND query_duration_ms > 5000  -- Queries taking more than 5 seconds
-ORDER BY query_duration_ms DESC 
-LIMIT 20;
-
--- Resource usage by table
-SELECT 
-    table,
-    sum(rows) as total_rows,
-    formatReadableSize(sum(data_compressed_bytes)) as compressed_size,
-    formatReadableSize(sum(data_uncompressed_bytes)) as uncompressed_size,
-    round(sum(data_compressed_bytes) * 100.0 / 
-          (SELECT sum(data_compressed_bytes) FROM system.parts WHERE database = 'beacon_chain'), 2) as size_percentage
-FROM system.parts 
-WHERE database = 'beacon_chain' 
-  AND active = 1
-GROUP BY table
-ORDER BY sum(data_compressed_bytes) DESC;
-
--- Most active queries
-SELECT 
-    normalizeQuery(query) as normalized_query,
-    count() as query_count,
-    avg(query_duration_ms) as avg_duration_ms,
-    sum(read_rows) as total_read_rows,
-    sum(memory_usage) as total_memory_usage
-FROM system.query_log 
-WHERE event_time >= now() - INTERVAL 1 DAY
-  AND type = 'QueryFinish'
-GROUP BY normalized_query
-HAVING query_count > 10
-ORDER BY total_memory_usage DESC
-LIMIT 20;
+FROM consolidation_requests 
+WHERE source_pubkey = target_pubkey;
 ```
 
 ### Cleanup Operations
 ```sql
 -- Remove old partitions (example: keep 1 year)
-ALTER TABLE blocks DROP PARTITION '202301';  -- January 2023
+ALTER TABLE blocks DROP PARTITION '202301';
 ALTER TABLE transactions DROP PARTITION '202301';
-ALTER TABLE attestations DROP PARTITION '202301';
-ALTER TABLE attester_slashings DROP PARTITION '202301';
+ALTER TABLE deposit_requests DROP PARTITION '202301';
+ALTER TABLE withdrawal_requests DROP PARTITION '202301';
+ALTER TABLE consolidation_requests DROP PARTITION '202301';
 
 -- Clean up failed processing attempts older than 7 days
 DELETE FROM era_completion
@@ -863,121 +970,38 @@ WHERE status = 'failed'
 -- Remove duplicate entries (if any)
 OPTIMIZE TABLE blocks FINAL;
 OPTIMIZE TABLE transactions FINAL;
-OPTIMIZE TABLE attestations FINAL;
-OPTIMIZE TABLE attester_slashings FINAL;
-
--- Check for orphaned records
-SELECT 
-    'transactions_without_execution_payload' as issue,
-    count() as count
-FROM transactions t
-LEFT JOIN execution_payloads ep ON t.slot = ep.slot
-WHERE ep.slot IS NULL
-
-UNION ALL
-
-SELECT 
-    'withdrawals_without_execution_payload' as issue,
-    count() as count
-FROM withdrawals w
-LEFT JOIN execution_payloads ep ON w.slot = ep.slot
-WHERE ep.slot IS NULL
-
-UNION ALL
-
-SELECT 
-    'attester_slashings_without_blocks' as issue,
-    count() as count
-FROM attester_slashings ats
-LEFT JOIN blocks b ON ats.slot = b.slot
-WHERE b.slot IS NULL;
+OPTIMIZE TABLE deposit_requests FINAL;
+OPTIMIZE TABLE withdrawal_requests FINAL;
+OPTIMIZE TABLE consolidation_requests FINAL;
 ```
 
 ## Troubleshooting
 
 ### Common Issues
 
+**Missing Execution Request Tables**:
+```bash
+# Run migrations to create new tables
+era-parser --migrate run
+```
+
 **Connection Timeouts**:
 ```bash
 # Increase timeout settings
 export CLICKHOUSE_CONNECT_TIMEOUT=60
 export CLICKHOUSE_SEND_RECEIVE_TIMEOUT=300
-
-# Test connection
-clickhouse-client --host $CLICKHOUSE_HOST --secure --password
 ```
 
-**Memory Issues**:
+**Slow Execution Request Queries**:
 ```sql
--- Check memory usage
-SELECT 
-    query,
-    memory_usage,
-    formatReadableSize(memory_usage) as memory_usage_readable,
-    peak_memory_usage,
-    formatReadableSize(peak_memory_usage) as peak_memory_readable
-FROM system.processes 
-WHERE memory_usage > 1000000000;  -- > 1GB
-
--- Check system memory
-SELECT 
-    metric,
-    value,
-    formatReadableSize(value) as readable_value
-FROM system.asynchronous_metrics 
-WHERE metric LIKE 'Memory%'
-ORDER BY metric;
-```
-
-**Slow Queries**:
-```sql
--- Find slow queries
-SELECT 
-    query,
-    query_duration_ms,
-    read_rows,
-    formatReadableSize(read_bytes) as read_bytes,
-    formatReadableSize(memory_usage) as memory_usage
-FROM system.query_log 
-WHERE event_time >= now() - INTERVAL 1 HOUR
-  AND query_duration_ms > 10000  -- > 10 seconds
-ORDER BY query_duration_ms DESC
-LIMIT 10;
-
--- Query optimization recommendations
-EXPLAIN SYNTAX 
-SELECT * FROM blocks WHERE timestamp_utc >= now() - INTERVAL 1 DAY;
-
 -- Check if indexes are being used
 EXPLAIN indexes = 1
-SELECT * FROM blocks WHERE proposer_index = 12345;
-```
+SELECT * FROM consolidation_requests WHERE source_address = '0x...';
 
-**Data Inconsistencies**:
-```sql
--- Check for missing data
-SELECT 
-    'Missing execution payloads' as issue,
-    count() as missing_count
-FROM blocks b
-LEFT JOIN execution_payloads ep ON b.slot = ep.slot
-WHERE ep.slot IS NULL 
-  AND b.timestamp_utc >= toDateTime('2022-09-15');  -- Post-merge only
-
--- Verify slot continuity
-SELECT 
-    slot,
-    prev_slot,
-    slot - prev_slot as gap
-FROM (
-    SELECT 
-        slot,
-        lag(slot) OVER (ORDER BY slot) as prev_slot
-    FROM blocks 
-    WHERE timestamp_utc >= now() - INTERVAL 1 DAY
-)
-WHERE gap > 1
-ORDER BY gap DESC;
+-- Optimize execution request tables
+OPTIMIZE TABLE deposit_requests FINAL;
+OPTIMIZE TABLE withdrawal_requests FINAL;
+OPTIMIZE TABLE consolidation_requests FINAL;
 ```
 
 ## Production Tips
@@ -985,69 +1009,52 @@ ORDER BY gap DESC;
 ### Data Pipeline Setup
 ```bash
 # Initial historical load with force mode
-era-parser --remote gnosis 0-2000 all-blocks --export clickhouse --force
+era-parser --remote mainnet 0-1400 all-blocks --export clickhouse --force
 
-# Incremental processing (normal mode)
-era-parser --remote gnosis 2001+ all-blocks --export clickhouse
+# Incremental processing for Electra+ execution requests
+era-parser --remote mainnet 1400+ all-blocks --export clickhouse
 
-# Recovery from failures
-era-parser --era-failed gnosis  # Check failures
-era-parser --remote gnosis <failed-range> all-blocks --export clickhouse --force
+# Monitor execution request data
+era-parser --era-status mainnet
 ```
 
 ### Monitoring Script
 ```bash
 #!/bin/bash
-# Check for failed eras and alert
-failed_count=$(clickhouse-client --query "SELECT count() FROM era_completion WHERE status = 'failed'")
-if [ "$failed_count" -gt 0 ]; then
-    echo "WARNING: $failed_count failed eras detected"
-    # Send alert
+# Check for execution request data availability
+deposit_requests=$(clickhouse-client --query "SELECT count() FROM deposit_requests WHERE timestamp_utc >= today()")
+withdrawal_requests=$(clickhouse-client --query "SELECT count() FROM withdrawal_requests WHERE timestamp_utc >= today()")
+consolidation_requests=$(clickhouse-client --query "SELECT count() FROM consolidation_requests WHERE timestamp_utc >= today()")
+
+echo "Today's execution requests:"
+echo "  Deposits: $deposit_requests"
+echo "  Withdrawals: $withdrawal_requests"  
+echo "  Consolidations: $consolidation_requests"
+
+if [ "$consolidation_requests" -gt 0 ]; then
+    echo "✅ Electra+ data is being processed"
+else
+    echo "ℹ️  No consolidation requests today (pre-Electra or no requests)"
 fi
-
-# Check data freshness
-latest_block=$(clickhouse-client --query "SELECT max(timestamp_utc) FROM blocks")
-current_time=$(date +%s)
-latest_block_ts=$(date -d "$latest_block" +%s)
-lag_minutes=$(( (current_time - latest_block_ts) / 60 ))
-
-if [ "$lag_minutes" -gt 60 ]; then
-    echo "WARNING: Data is $lag_minutes minutes behind"
-    # Send alert
-fi
-```
-
-### Backup Strategy
-```sql
--- Backup critical tables
-BACKUP TABLE beacon_chain.era_completion TO S3('s3://backup-bucket/era_completion/');
-BACKUP TABLE beacon_chain.blocks TO S3('s3://backup-bucket/blocks/');
-
--- Incremental backup
-BACKUP TABLE beacon_chain.blocks 
-WHERE timestamp_utc >= today() - INTERVAL 1 DAY
-TO S3('s3://backup-bucket/blocks_incremental/');
 ```
 
 ### Performance Tuning
 ```sql
--- Optimize tables regularly
-OPTIMIZE TABLE blocks FINAL;
-OPTIMIZE TABLE transactions FINAL;
-OPTIMIZE TABLE attestations FINAL;
+-- Optimize execution request tables regularly
+OPTIMIZE TABLE deposit_requests FINAL;
+OPTIMIZE TABLE withdrawal_requests FINAL;
+OPTIMIZE TABLE consolidation_requests FINAL;
 
--- Monitor partition sizes
+-- Monitor execution request table sizes
 SELECT 
     table,
-    partition,
-    formatReadableSize(bytes_on_disk) as size
+    formatReadableSize(bytes_on_disk) as size,
+    rows
 FROM system.parts 
 WHERE database = 'beacon_chain'
-  AND bytes_on_disk > 1000000000  -- > 1GB
+  AND table IN ('deposit_requests', 'withdrawal_requests', 'consolidation_requests')
+  AND active = 1
 ORDER BY bytes_on_disk DESC;
-
--- Adjust merge settings for high-volume tables
-ALTER TABLE blocks MODIFY SETTING max_bytes_to_merge_at_max_space_in_pool = 161061273600;
 ```
 
 ---
