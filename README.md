@@ -336,5 +336,5 @@ era-parser --remote gnosis 1000+ all-blocks --export clickhouse
 
 ## 📄 License
 
-MIT License - see LICENSE file for details.
+This project is licensed under the [MIT License](LICENSE)
 
