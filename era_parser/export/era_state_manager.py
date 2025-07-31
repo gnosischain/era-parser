@@ -31,9 +31,9 @@ class EraStateManager:
         'blocks', 'sync_aggregates', 'execution_payloads', 'transactions', 
         'withdrawals', 'attestations', 'deposits', 'voluntary_exits',
         'proposer_slashings', 'attester_slashings', 'bls_changes', 
-        'blob_commitments', 'execution_requests'
+        'blob_commitments', 
+        'deposit_requests', 'withdrawal_requests', 'consolidation_requests'
     ]
-    
     def __init__(self):
         """Initialize era state manager from environment variables"""
         self.host = os.getenv('CLICKHOUSE_HOST')

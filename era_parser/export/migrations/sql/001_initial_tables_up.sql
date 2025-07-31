@@ -202,21 +202,43 @@ CREATE TABLE IF NOT EXISTS {database}.blob_commitments (
 PARTITION BY toStartOfMonth(timestamp_utc)
 ORDER BY (slot, commitment_index);
 
-CREATE TABLE IF NOT EXISTS {database}.execution_requests (
+
+CREATE TABLE IF NOT EXISTS {database}.deposit_requests (
     slot UInt64,
-    request_type String,
     request_index UInt64,
-    pubkey String DEFAULT '',
-    withdrawal_credentials String DEFAULT '',
-    amount UInt64 DEFAULT 0,
-    signature String DEFAULT '',
-    deposit_request_index UInt64 DEFAULT 0,
-    source_address String DEFAULT '',
-    validator_pubkey String DEFAULT '',
-    source_pubkey String DEFAULT '',
-    target_pubkey String DEFAULT '',
+    pubkey String,
+    withdrawal_credentials String,
+    amount UInt64,
+    signature String,
+    deposit_request_index UInt64,
     timestamp_utc DateTime DEFAULT toDateTime(0),
     insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
 ) ENGINE = ReplacingMergeTree(insert_version)
 PARTITION BY toStartOfMonth(timestamp_utc)
-ORDER BY (slot, request_type, request_index);
+ORDER BY (slot, request_index, pubkey);
+
+-- Withdrawal Requests (EIP-7002) - Validator withdrawal requests  
+CREATE TABLE IF NOT EXISTS {database}.withdrawal_requests (
+    slot UInt64,
+    request_index UInt64,
+    source_address String,
+    validator_pubkey String,
+    amount UInt64,
+    timestamp_utc DateTime DEFAULT toDateTime(0),
+    insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
+) ENGINE = ReplacingMergeTree(insert_version)
+PARTITION BY toStartOfMonth(timestamp_utc)
+ORDER BY (slot, request_index, source_address);
+
+-- Consolidation Requests (EIP-7251) - Validator consolidation requests
+CREATE TABLE IF NOT EXISTS {database}.consolidation_requests (
+    slot UInt64,
+    request_index UInt64,
+    source_address String,
+    source_pubkey String,
+    target_pubkey String,
+    timestamp_utc DateTime DEFAULT toDateTime(0),
+    insert_version UInt64 MATERIALIZED toUnixTimestamp64Nano(now64(9))
+) ENGINE = ReplacingMergeTree(insert_version)
+PARTITION BY toStartOfMonth(timestamp_utc)
+ORDER BY (slot, request_index, source_address);

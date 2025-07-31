@@ -402,11 +402,19 @@ class ClickHouseService:
             'blob_commitments': [
                 'slot', 'commitment_index', 'commitment', 'timestamp_utc'
             ],
-            'execution_requests': [
-                'slot', 'request_type', 'request_index', 'pubkey', 'withdrawal_credentials', 
-                'amount', 'signature', 'deposit_request_index', 'source_address', 'validator_pubkey',
-                'source_pubkey', 'target_pubkey', 'timestamp_utc'
+            'deposit_requests': [
+                'slot', 'request_index', 'pubkey', 'withdrawal_credentials', 
+                'amount', 'signature', 'deposit_request_index', 'timestamp_utc'
             ],
+            'withdrawal_requests': [
+                'slot', 'request_index', 'source_address', 'validator_pubkey', 
+                'amount', 'timestamp_utc'
+            ],
+            'consolidation_requests': [
+                'slot', 'request_index', 'source_address', 'source_pubkey', 
+                'target_pubkey', 'timestamp_utc'
+            ],
+            # Keep for migration compatibility
             'era_processing_state': [
                 'era_filename', 'network', 'era_number', 'dataset', 'status', 
                 'worker_id', 'attempt_count', 'file_hash', 'error_message', 

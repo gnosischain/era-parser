@@ -99,10 +99,10 @@ class EraProcessor:
         return blocks
     
     def extract_all_data(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Extract ALL data from blocks"""
+        """Extract ALL data from blocks into separate tables"""
         block_records = self.era_reader.get_block_records()
         
-        # Initialize all possible data types
+        # Initialize all data types with SEPARATE execution request tables
         all_data = {
             'blocks': [],
             'execution_payloads': [],  
@@ -116,11 +116,13 @@ class EraProcessor:
             'attester_slashings': [],
             'bls_changes': [],
             'blob_commitments': [],
-            'execution_requests': []
+            # SEPARATE execution request types (NO 'execution_requests')
+            'deposit_requests': [],
+            'withdrawal_requests': [],
+            'consolidation_requests': []
         }
         
         successful = 0
-        
         
         for i, (slot, compressed_data) in enumerate(block_records):
             if (i + 1) % 100 == 0:
@@ -145,7 +147,7 @@ class EraProcessor:
                 "state_root": message.get("state_root"),
                 "signature": block.get("data", {}).get("signature"),
                 "version": block.get("version"),
-                "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                "timestamp_utc": timestamp_utc,
                 "randao_reveal": body.get("randao_reveal"),
                 "graffiti": body.get("graffiti"),
                 "eth1_deposit_root": body.get("eth1_data", {}).get("deposit_root"),
@@ -159,10 +161,10 @@ class EraProcessor:
                     "slot": slot,
                     "sync_committee_bits": sync_aggregate.get("sync_committee_bits"),
                     "sync_committee_signature": sync_aggregate.get("sync_committee_signature"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                    "timestamp_utc": timestamp_utc,
                 })
             
-            # Execution Payloads - SINGLE timestamp (NO duplicate timestamp field)
+            # Execution Payloads - SINGLE timestamp
             if execution_payload:
                 all_data['execution_payloads'].append({
                     "slot": slot,
@@ -175,7 +177,7 @@ class EraProcessor:
                     "block_number": execution_payload.get("block_number"),
                     "gas_limit": execution_payload.get("gas_limit"),
                     "gas_used": execution_payload.get("gas_used"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp - NO duplicate!
+                    "timestamp_utc": timestamp_utc,
                     "base_fee_per_gas": execution_payload.get("base_fee_per_gas"),
                     "block_hash": execution_payload.get("block_hash"),
                     "blob_gas_used": execution_payload.get("blob_gas_used"),
@@ -196,7 +198,7 @@ class EraProcessor:
                     "gas_limit": execution_payload.get("gas_limit"),
                     "gas_used": execution_payload.get("gas_used"),
                     "base_fee_per_gas": execution_payload.get("base_fee_per_gas"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp - NO duplicate
+                    "timestamp_utc": timestamp_utc,
                 })
             
             # Withdrawals - SINGLE timestamp
@@ -210,7 +212,7 @@ class EraProcessor:
                     "validator_index": withdrawal.get("validator_index"),
                     "address": withdrawal.get("address"),
                     "amount": withdrawal.get("amount"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp - NO duplicate
+                    "timestamp_utc": timestamp_utc,
                 })
             
             # Attestations - FULL nested data with SINGLE timestamp
@@ -232,7 +234,7 @@ class EraProcessor:
                     "source_root": source.get("root"),
                     "target_epoch": target.get("epoch"),
                     "target_root": target.get("root"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                    "timestamp_utc": timestamp_utc,
                 })
             
             # Deposits - Handle properly parsed deposit structure with SINGLE timestamp
@@ -241,18 +243,15 @@ class EraProcessor:
                 deposit_data = deposit.get("data", {})
                 proof = deposit.get("proof", [])
                 
-                # Create deposit record with unnested data fields
                 deposit_record = {
                     "slot": slot,
                     "deposit_index": deposit_idx,
-                    # Unnested data fields (moved from data.* to top level)
                     "pubkey": deposit_data.get("pubkey", ""),
                     "withdrawal_credentials": deposit_data.get("withdrawal_credentials", ""),
                     "amount": deposit_data.get("amount", "0"),
                     "signature": deposit_data.get("signature", ""),
-                    # Proof as JSON array (much cleaner than 33 individual columns)
                     "proof": json.dumps(proof) if proof else "[]",
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                    "timestamp_utc": timestamp_utc,
                 }
                 
                 all_data['deposits'].append(deposit_record)
@@ -267,7 +266,7 @@ class EraProcessor:
                     "signature": voluntary_exit.get("signature"),
                     "epoch": exit_message.get("epoch"),
                     "validator_index": exit_message.get("validator_index"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                    "timestamp_utc": timestamp_utc,
                 })
             
             # Proposer Slashings - FULL data with SINGLE timestamp
@@ -291,7 +290,7 @@ class EraProcessor:
                     "header_2_state_root": signed_header_2.get("message", {}).get("state_root"),
                     "header_2_body_root": signed_header_2.get("message", {}).get("body_root"),
                     "header_2_signature": signed_header_2.get("signature"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                    "timestamp_utc": timestamp_utc,
                 })
             
             # Attester Slashings - FULL data with SINGLE timestamp
@@ -300,11 +299,8 @@ class EraProcessor:
                 attestation_1 = slashing.get("attestation_1", {})
                 attestation_2 = slashing.get("attestation_2", {})
                 
-                # Get attesting indices arrays
                 att_1_indices = attestation_1.get("attesting_indices", [])
                 att_2_indices = attestation_2.get("attesting_indices", [])
-                
-                # Calculate total unique slashed validators
                 all_indices = set(att_1_indices + att_2_indices)
                 
                 all_data['attester_slashings'].append({
@@ -345,7 +341,7 @@ class EraProcessor:
                     "validator_index": change_message.get("validator_index"),
                     "from_bls_pubkey": change_message.get("from_bls_pubkey"),
                     "to_execution_address": change_message.get("to_execution_address"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                    "timestamp_utc": timestamp_utc,
                 })
             
             # Blob Commitments - FULL data with SINGLE timestamp (Deneb+)
@@ -355,51 +351,48 @@ class EraProcessor:
                     "slot": slot,
                     "commitment_index": commit_idx,
                     "commitment": commitment,
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                    "timestamp_utc": timestamp_utc,
                 })
             
-            # Execution Requests - FULL data with SINGLE timestamp (Electra+)
+            # SEPARATE EXECUTION REQUEST TABLES (Electra+)
             execution_requests = body.get("execution_requests", {})
             
-            # Deposit requests
+            # Deposit Requests 
             deposit_requests = execution_requests.get("deposits", [])
             for req_idx, deposit_req in enumerate(deposit_requests):
-                all_data['execution_requests'].append({
+                all_data['deposit_requests'].append({
                     "slot": slot,
-                    "request_type": "deposit",
                     "request_index": req_idx,
-                    "pubkey": deposit_req.get("pubkey"),
-                    "withdrawal_credentials": deposit_req.get("withdrawal_credentials"),
-                    "amount": deposit_req.get("amount"),
-                    "signature": deposit_req.get("signature"),
-                    "deposit_request_index": deposit_req.get("index"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                    "pubkey": deposit_req.get("pubkey", ""),
+                    "withdrawal_credentials": deposit_req.get("withdrawal_credentials", ""),
+                    "amount": deposit_req.get("amount", "0"),
+                    "signature": deposit_req.get("signature", ""),
+                    "deposit_request_index": deposit_req.get("index", 0),
+                    "timestamp_utc": timestamp_utc,
                 })
             
-            # Withdrawal requests
+            # Withdrawal Requests 
             withdrawal_requests = execution_requests.get("withdrawals", [])
             for req_idx, withdrawal_req in enumerate(withdrawal_requests):
-                all_data['execution_requests'].append({
+                all_data['withdrawal_requests'].append({
                     "slot": slot,
-                    "request_type": "withdrawal",
                     "request_index": req_idx,
-                    "source_address": withdrawal_req.get("source_address"),
-                    "validator_pubkey": withdrawal_req.get("validator_pubkey"),
-                    "amount": withdrawal_req.get("amount"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                    "source_address": withdrawal_req.get("source_address", ""),
+                    "validator_pubkey": withdrawal_req.get("validator_pubkey", ""),
+                    "amount": withdrawal_req.get("amount", "0"),
+                    "timestamp_utc": timestamp_utc,
                 })
             
-            # Consolidation requests  
+            # Consolidation Requests 
             consolidation_requests = execution_requests.get("consolidations", [])
             for req_idx, consolidation_req in enumerate(consolidation_requests):
-                all_data['execution_requests'].append({
+                all_data['consolidation_requests'].append({
                     "slot": slot,
-                    "request_type": "consolidation", 
                     "request_index": req_idx,
-                    "source_address": consolidation_req.get("source_address"),
-                    "source_pubkey": consolidation_req.get("source_pubkey"),
-                    "target_pubkey": consolidation_req.get("target_pubkey"),
-                    "timestamp_utc": timestamp_utc,  # SINGLE timestamp
+                    "source_address": consolidation_req.get("source_address", ""),
+                    "source_pubkey": consolidation_req.get("source_pubkey", ""),
+                    "target_pubkey": consolidation_req.get("target_pubkey", ""),
+                    "timestamp_utc": timestamp_utc,
                 })
         
         print(f"✅ Successfully processed {successful} blocks")
@@ -502,7 +495,8 @@ class EraProcessor:
                     blocks = self.parse_all_blocks()
                     self.export_data(blocks, output_file, "blocks", export_type=export_type)
                     
-            elif command in ["transactions", "withdrawals", "attestations", "sync_aggregates"]:
+            elif command in ["transactions", "withdrawals", "attestations", "sync_aggregates", 
+                           "deposit_requests", "withdrawal_requests", "consolidation_requests"]:
                 data = self.extract_specific_data(command)
                 self.export_data(data, output_file, command, export_type=export_type)
             else:

@@ -60,7 +60,7 @@ class ElectraParser(DenebParser):
     parse_consolidation_request.ssz_size = 116
 
     def parse_execution_requests(self, data: bytes) -> Dict[str, Any]:
-        """Parse ExecutionRequests"""
+        """Parse ExecutionRequests with proper SSZ offset handling"""
         if len(data) < 12:
             return {"deposits": [], "withdrawals": [], "consolidations": []}
         
@@ -71,21 +71,54 @@ class ElectraParser(DenebParser):
             
             result = {"deposits": [], "withdrawals": [], "consolidations": []}
             
-            if deposits_offset < len(data):
-                end_offset = min([o for o in [withdrawals_offset, consolidations_offset, len(data)] if o > deposits_offset])
-                deposits_data = data[deposits_offset:end_offset]
-                result["deposits"] = parse_list_of_items(deposits_data, self.parse_deposit_request)
+            # In SSZ, empty lists all point to the same offset
+            # We need to identify unique data sections and parse only the non-empty ones
+            unique_offsets = sorted(set([deposits_offset, withdrawals_offset, consolidations_offset]))
             
-            if withdrawals_offset < len(data):
-                end_offset = min([o for o in [consolidations_offset, len(data)] if o > withdrawals_offset])
-                withdrawals_data = data[withdrawals_offset:end_offset]
-                result["withdrawals"] = parse_list_of_items(withdrawals_data, self.parse_withdrawal_request)
+            # Parse each unique section
+            for i, offset in enumerate(unique_offsets):
+                if offset >= len(data) or offset < 12:  # Skip invalid or empty sections
+                    continue
+                    
+                # Calculate section end
+                section_end = len(data)
+                if i + 1 < len(unique_offsets):
+                    section_end = unique_offsets[i + 1]
                 
-            if consolidations_offset < len(data):
-                consolidations_data = data[consolidations_offset:]
-                result["consolidations"] = parse_list_of_items(consolidations_data, self.parse_consolidation_request)
+                section_data = data[offset:section_end]
                 
+                if len(section_data) == 0:
+                    continue
+                    
+                # Determine which request type(s) use this offset
+                using_this_offset = []
+                if deposits_offset == offset:
+                    using_this_offset.append("deposits")
+                if withdrawals_offset == offset:
+                    using_this_offset.append("withdrawals")
+                if consolidations_offset == offset:
+                    using_this_offset.append("consolidations")
+                    
+                # If multiple types share the same offset, only the "rightmost" one has data
+                if len(using_this_offset) > 1:
+                    if "consolidations" in using_this_offset:
+                        result["consolidations"] = parse_list_of_items(section_data, self.parse_consolidation_request)
+                    elif "withdrawals" in using_this_offset:
+                        result["withdrawals"] = parse_list_of_items(section_data, self.parse_withdrawal_request)
+                    elif "deposits" in using_this_offset:
+                        result["deposits"] = parse_list_of_items(section_data, self.parse_deposit_request)
+                else:
+                    # Single type uses this offset
+                    request_type = using_this_offset[0]
+                    
+                    if request_type == "deposits":
+                        result["deposits"] = parse_list_of_items(section_data, self.parse_deposit_request)
+                    elif request_type == "withdrawals":
+                        result["withdrawals"] = parse_list_of_items(section_data, self.parse_withdrawal_request)
+                    elif request_type == "consolidations":
+                        result["consolidations"] = parse_list_of_items(section_data, self.parse_consolidation_request)
+            
             return result
             
-        except Exception:
+        except Exception as e:
             return {"deposits": [], "withdrawals": [], "consolidations": []}
